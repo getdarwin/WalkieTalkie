@@ -157,4 +157,131 @@ async function sendToSlack({ channel, friendlyName, toNumber, fromNumber, body }
   });
 }
 
-module.exports = { sendToSlack };
+// ─── Voice Block Kit builders ─────────────────────────────────────────────────
+
+/**
+ * Block Kit for the initial "call is ringing" message posted to the shared thread.
+ */
+function buildCallStartBlocks(fromNumber) {
+  return [
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*📞 Incoming call*\n${fromNumber}` },
+        { type: 'mrkdwn', text: `*Time:*\n${new Date().toLocaleTimeString()}` },
+      ],
+    },
+    {
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: '_Recording in progress..._' }],
+    },
+  ];
+}
+
+/**
+ * Block Kit for when the recording is ready.
+ */
+function buildCallRecordingBlocks(recordingUrl, durationSeconds) {
+  const duration = durationSeconds ? `${durationSeconds}s` : 'unknown duration';
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `🎙️ *Recording* — ${duration}\n<${recordingUrl}|Listen ↗>`,
+      },
+    },
+  ];
+}
+
+/**
+ * Block Kit for a completed transcription, with optional OTP highlighting.
+ */
+function buildCallTranscriptBlocks(transcriptText, otp) {
+  const blocks = [
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: `📝 _"${transcriptText}"_` },
+    },
+  ];
+
+  if (otp) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*Verification Code:*\n\`\`\`${otp}\`\`\`` },
+    });
+  }
+
+  return blocks;
+}
+
+// ─── Voice posting helpers ────────────────────────────────────────────────────
+
+/**
+ * Posts a reply to an existing Slack thread by ts.
+ * Used by voice recording + transcription callbacks which already know threadTs.
+ *
+ * @param {string}   channel    Slack channel ID
+ * @param {string}   threadTs   Parent message timestamp
+ * @param {object[]} blocks     Block Kit blocks
+ * @param {string}   text       Fallback text
+ * @param {boolean}  broadcast  Whether to also show in channel (reply_broadcast)
+ */
+async function postToThread(channel, threadTs, blocks, text, broadcast = false) {
+  await client.chat.postMessage({
+    channel,
+    thread_ts: threadTs,
+    blocks,
+    text,
+    ...(broadcast ? { reply_broadcast: true } : {}),
+  });
+}
+
+/**
+ * Posts an incoming call notification to the shared daily thread for that line.
+ * Returns the threadTs so it can be stored against the CallSid.
+ *
+ * @param {object} opts
+ * @param {string} opts.channel       Slack channel ID
+ * @param {string} opts.friendlyName  Human-readable line name
+ * @param {string} opts.toNumber      Raw E.164 Twilio "To" number
+ * @param {string} opts.fromNumber    Raw E.164 caller number
+ * @returns {Promise<string>} threadTs of the shared thread
+ */
+async function sendCallStartToSlack({ channel, friendlyName, toNumber, fromNumber }) {
+  const threads = loadThreads();
+  const key = threadKey(channel, toNumber);
+  const blocks = buildCallStartBlocks(fromNumber);
+  const fallbackText = `📞 Incoming call to ${friendlyName} from ${fromNumber}`;
+
+  let threadTs = threads[key];
+
+  if (!threadTs) {
+    const headerResult = await client.chat.postMessage({
+      channel,
+      blocks: buildThreadHeaderBlocks(friendlyName, toNumber),
+      text: `Thread for ${friendlyName} — ${todayKey()}`,
+    });
+    threadTs = headerResult.ts;
+    threads[key] = threadTs;
+    saveThreads(threads);
+  }
+
+  await client.chat.postMessage({
+    channel,
+    thread_ts: threadTs,
+    blocks,
+    text: fallbackText,
+  });
+
+  return threadTs;
+}
+
+module.exports = {
+  sendToSlack,
+  sendCallStartToSlack,
+  postToThread,
+  parseOtp,
+  buildCallRecordingBlocks,
+  buildCallTranscriptBlocks,
+};

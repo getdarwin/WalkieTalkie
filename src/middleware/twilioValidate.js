@@ -18,9 +18,9 @@ function twilioValidate(req, res, next) {
     return res.status(403).type('text').send('Forbidden');
   }
 
-  // The URL must exactly match what is configured in the Twilio console.
-  // WEBHOOK_BASE_URL must have no trailing slash.
-  const webhookUrl = `${process.env.WEBHOOK_BASE_URL}/twilio-webhook`;
+  // Reconstruct the full URL from the incoming request so it matches exactly
+  // what Twilio signed — works for /twilio-webhook, /twilio-voice, and sub-paths.
+  const webhookUrl = `${process.env.WEBHOOK_BASE_URL}${req.originalUrl}`;
 
   const isValid = twilio.validateRequest(authToken, signature, webhookUrl, req.body);
 
