@@ -1,18 +1,15 @@
 const express = require('express');
+const { WebClient } = require('@slack/web-api');
+const Groq = require('groq-sdk');
 const twilioValidate = require('../middleware/twilioValidate');
 const { getFriendlyName, getChannel } = require('../services/numbers');
 const { checkAndCacheCapabilities } = require('../services/capabilities');
 const { saveCallThread, getCallThread } = require('../services/callThreads');
 const { logTransaction } = require('../services/logger');
-const {
-  sendCallStartToSlack,
-  postToThread,
-  parseOtp,
-  buildCallRecordingBlocks,
-  buildCallTranscriptBlocks,
-} = require('../services/slack');
+const { sendCallStartToSlack, postToThread, parseOtp, buildCallTranscriptBlocks } = require('../services/slack');
 
 const router = express.Router();
+const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -20,17 +17,68 @@ function twimlResponse(res, xml = '') {
   res.type('text/xml').send(`<Response>${xml}</Response>`);
 }
 
-// ─── POST /twilio-voice ───────────────────────────────────────────────────────
+/**
+ * Downloads the Twilio recording as an MP3 buffer.
+ * Twilio requires Basic Auth (Account SID + Auth Token).
+ */
+async function downloadRecording(recordingUrl) {
+  const url = `${recordingUrl}.mp3`;
+  const auth = Buffer.from(
+    `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+  ).toString('base64');
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Basic ${auth}` },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to download recording: ${response.status} ${response.statusText}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  return { buffer: Buffer.from(arrayBuffer), url };
+}
 
 /**
- * Inbound call handler. Called by Twilio when any voice-capable number receives a call.
- * Immediately posts to Slack, then instructs Twilio to record silently.
- *
- * TwiML returned:
- *   <Record> with transcription enabled, no beep, no greeting.
- *   The `action` URL is called when the recording ends.
- *   The `transcribeCallback` URL is called when transcription is ready.
+ * Uploads the MP3 buffer to a Slack thread as a file.
  */
+async function uploadAudioToSlack({ channel, threadTs, buffer, filename, duration }) {
+  await slack.files.uploadV2({
+    channel_id: channel,
+    thread_ts: threadTs,
+    file: buffer,
+    filename,
+    title: `📞 Recording — ${duration}s`,
+  });
+}
+
+/**
+ * Transcribes an MP3 buffer using Groq Whisper.
+ * Returns null if GROQ_API_KEY is not set or transcription fails.
+ *
+ * @param {Buffer} buffer  MP3 audio buffer
+ * @param {string} filename
+ * @returns {Promise<string|null>}
+ */
+async function transcribeWithGroq(buffer, filename) {
+  if (!process.env.GROQ_API_KEY) return null;
+
+  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+  // Groq expects a File-like object — wrap the buffer
+  const file = new File([buffer], filename, { type: 'audio/mpeg' });
+
+  const result = await groq.audio.transcriptions.create({
+    file,
+    model: 'whisper-large-v3-turbo',
+    response_format: 'text',
+  });
+
+  return typeof result === 'string' ? result.trim() : null;
+}
+
+// ─── POST /twilio-voice ───────────────────────────────────────────────────────
+
 router.post('/', twilioValidate, async (req, res) => {
   const { From, To, CallSid } = req.body;
 
@@ -41,7 +89,6 @@ router.post('/', twilioValidate, async (req, res) => {
 
   console.log(`[voice] Incoming call  To=${To}  From=${From}  CallSid=${CallSid}`);
 
-  // Fire-and-forget capabilities cache
   checkAndCacheCapabilities(To).catch(() => {});
 
   const friendlyName = getFriendlyName(To);
@@ -54,15 +101,11 @@ router.post('/', twilioValidate, async (req, res) => {
     console.error('[voice] Failed to post call start to Slack:', err.message);
   }
 
-  // Record silently — no greeting, no beep
-  // action: called when recording ends (caller hangs up or maxLength reached)
-  // transcribeCallback: called when Twilio finishes transcribing
+  // Record silently — no beep, no greeting
   const baseUrl = process.env.WEBHOOK_BASE_URL;
   twimlResponse(res, `
     <Record
       maxLength="120"
-      transcribe="true"
-      transcribeCallback="${baseUrl}/twilio-voice/transcription"
       action="${baseUrl}/twilio-voice/recording"
       playBeep="false"
     />
@@ -71,33 +114,45 @@ router.post('/', twilioValidate, async (req, res) => {
 
 // ─── POST /twilio-voice/recording ─────────────────────────────────────────────
 
-/**
- * Called by Twilio when the recording is ready (caller hung up or maxLength reached).
- * Posts the recording link and duration to the Slack thread.
- */
 router.post('/recording', twilioValidate, async (req, res) => {
-  const { CallSid, RecordingUrl, RecordingDuration, RecordingStatus } = req.body;
+  const { CallSid, RecordingUrl, RecordingDuration } = req.body;
 
-  console.log(`[voice] Recording ready  CallSid=${CallSid}  Duration=${RecordingDuration}s  Status=${RecordingStatus}`);
+  console.log(`[voice] Recording ready  CallSid=${CallSid}  Duration=${RecordingDuration}s`);
+
+  // Respond to Twilio immediately — download + upload happens after
+  twimlResponse(res);
 
   const thread = getCallThread(CallSid);
   if (!thread) {
     console.warn(`[voice] No thread found for CallSid=${CallSid}`);
-    return twimlResponse(res);
+    return;
   }
 
   const duration = parseInt(RecordingDuration) || 0;
-  // Twilio recording URLs need .mp3 appended for direct playback
-  const audioUrl = RecordingUrl ? `${RecordingUrl}.mp3` : null;
 
   try {
-    if (audioUrl && duration > 0) {
+    const { buffer } = await downloadRecording(RecordingUrl);
+    const filename = `call-${CallSid}-${Date.now()}.mp3`;
+
+    // Upload audio + transcribe in parallel
+    const [, transcript] = await Promise.all([
+      uploadAudioToSlack({ channel: thread.channel, threadTs: thread.threadTs, buffer, filename, duration }),
+      transcribeWithGroq(buffer, filename),
+    ]);
+
+    console.log(`[voice] Audio uploaded to Slack  CallSid=${CallSid}`);
+
+    // Post transcript if we got one
+    if (transcript) {
+      const otp = parseOtp(transcript);
       await postToThread(
         thread.channel,
         thread.threadTs,
-        buildCallRecordingBlocks(audioUrl, duration),
-        `🎙️ Recording — ${duration}s`
+        buildCallTranscriptBlocks(transcript, otp),
+        `📝 "${transcript}"`,
+        !!otp
       );
+      console.log(`[voice] Transcript posted  otp=${otp || 'none'}`);
     }
 
     logTransaction({
@@ -105,15 +160,16 @@ router.post('/recording', twilioValidate, async (req, res) => {
       to: thread.toNumber,
       from: thread.fromNumber,
       callSid: CallSid,
-      recordingUrl: audioUrl,
+      recordingUrl: `${RecordingUrl}.mp3`,
       duration,
+      transcript: transcript || null,
+      otp: transcript ? parseOtp(transcript) : null,
       friendlyName: thread.friendlyName,
       channel: thread.channel,
-      otp: null,
       status: 'success',
     });
   } catch (err) {
-    console.error('[voice] Failed to post recording to Slack:', err.message);
+    console.error('[voice] Failed to upload recording to Slack:', err.message);
     logTransaction({
       type: 'voice-recording',
       to: thread.toNumber,
@@ -126,71 +182,6 @@ router.post('/recording', twilioValidate, async (req, res) => {
       error: err.message,
     });
   }
-
-  twimlResponse(res);
-});
-
-// ─── POST /twilio-voice/transcription ─────────────────────────────────────────
-
-/**
- * Called by Twilio when speech transcription is complete.
- * Posts the transcript to Slack, auto-detects and broadcasts OTPs.
- */
-router.post('/transcription', twilioValidate, async (req, res) => {
-  const { CallSid, TranscriptionText, TranscriptionStatus } = req.body;
-
-  console.log(`[voice] Transcription ready  CallSid=${CallSid}  Status=${TranscriptionStatus}`);
-
-  if (TranscriptionStatus !== 'completed' || !TranscriptionText) {
-    console.warn(`[voice] Transcription not completed or empty — skipping  Status=${TranscriptionStatus}`);
-    return res.sendStatus(204);
-  }
-
-  const thread = getCallThread(CallSid);
-  if (!thread) {
-    console.warn(`[voice] No thread found for CallSid=${CallSid}`);
-    return res.sendStatus(204);
-  }
-
-  const otp = parseOtp(TranscriptionText);
-
-  try {
-    await postToThread(
-      thread.channel,
-      thread.threadTs,
-      buildCallTranscriptBlocks(TranscriptionText, otp),
-      `📝 Transcript: "${TranscriptionText}"`,
-      !!otp  // broadcast to channel if OTP detected
-    );
-
-    logTransaction({
-      type: 'voice-transcription',
-      to: thread.toNumber,
-      from: thread.fromNumber,
-      callSid: CallSid,
-      transcript: TranscriptionText,
-      friendlyName: thread.friendlyName,
-      channel: thread.channel,
-      otp,
-      status: 'success',
-    });
-  } catch (err) {
-    console.error('[voice] Failed to post transcript to Slack:', err.message);
-    logTransaction({
-      type: 'voice-transcription',
-      to: thread.toNumber,
-      from: thread.fromNumber,
-      callSid: CallSid,
-      transcript: TranscriptionText,
-      friendlyName: thread.friendlyName,
-      channel: thread.channel,
-      otp,
-      status: 'error',
-      error: err.message,
-    });
-  }
-
-  res.sendStatus(204);
 });
 
 module.exports = router;
