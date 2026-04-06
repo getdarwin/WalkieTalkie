@@ -5,15 +5,24 @@
  *   node scripts/configure-from-csv.js path/to/numbers.csv
  *
  * CSV format (header row required):
- *   phone_number,friendly_name,channel_id
- *   +15103137237,Darwin OPS,C0AQN4ELYTF
- *   +5519933007190,Brazil Line 1,C0AQN4ELYTF
- *   +525595494294,,                          ← Twilio config only, no name/channel
+ *   phone_number,friendly_name,channel_id,routing,sms,voice
+ *
+ *   phone_number  — E.164 format, required
+ *   friendly_name — label shown in Slack threads (optional)
+ *   channel_id    — Slack channel ID override (optional)
+ *   routing       — "walkietalkie" (default) or "vapi"/"talkyto" — controls whether
+ *                   Twilio webhook URLs are configured for this number.
+ *                   Numbers with routing=vapi/talkyto are saved to numbers.json but
+ *                   their Twilio webhooks are left untouched.
+ *   sms, voice    — informational only (yes/no), not used by this script
+ *
+ * Download the current directory as a starting point:
+ *   curl http://localhost:3000/numbers.csv -o numbers.csv
  *
  * What this script does per row:
- *   1. Updates config/numbers.json with name + channel (if provided)
- *   2. Fetches the number's SID from Twilio
- *   3. Sets smsUrl and/or voiceUrl based on capabilities (skips Vapi numbers)
+ *   1. Updates config/numbers.json with name + channel + routing (if provided)
+ *   2. Fetches the number's SID from Twilio (skipped for vapi/talkyto rows)
+ *   3. Sets smsUrl and/or voiceUrl based on capabilities (skipped for vapi/talkyto rows)
  */
 require('dotenv').config();
 
@@ -58,12 +67,26 @@ function saveNumbersConfig(config) {
 function parseCSV(filePath) {
   const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
   const [header, ...rows] = lines;
-  const headers = header.split(',').map((h) => h.trim());
+  const headers = header.split(',').map((h) => h.trim().toLowerCase());
 
   return rows.map((row) => {
-    const values = row.split(',').map((v) => v.trim());
+    // Handle quoted fields (e.g. "Name, With Comma")
+    const values = [];
+    let current = '';
+    let inQuotes = false;
+    for (const char of row) {
+      if (char === '"') { inQuotes = !inQuotes; }
+      else if (char === ',' && !inQuotes) { values.push(current.trim()); current = ''; }
+      else { current += char; }
+    }
+    values.push(current.trim());
+
     return Object.fromEntries(headers.map((h, i) => [h, values[i] || '']));
   }).filter((r) => r.phone_number);
+}
+
+function isVapi(routing) {
+  return routing && ['vapi', 'talkyto'].includes(routing.toLowerCase().trim());
 }
 
 async function run() {
@@ -76,20 +99,32 @@ async function run() {
     const phone = row.phone_number;
     const name = row.friendly_name || '';
     const channel = row.channel_id || '';
+    const routing = row.routing || 'walkietalkie';
+    const vapiLine = isVapi(routing);
 
     process.stdout.write(`  ${phone}`);
 
     // 1. Update numbers.json
-    if (name && channel) {
-      config.numbers[phone] = { name, channel };
-    } else if (name) {
-      config.numbers[phone] = name;
-    } else if (channel) {
-      config.numbers[phone] = { name: '', channel };
-    }
-    // If neither, skip numbers.json update but still configure Twilio
+    const entry = {};
+    if (name) entry.name = name;
+    if (channel) entry.channel = channel;
+    if (vapiLine) entry.routing = 'vapi';
 
-    // 2. Fetch from Twilio
+    if (Object.keys(entry).length === 1 && entry.name) {
+      config.numbers[phone] = name; // simple string form
+    } else if (Object.keys(entry).length > 0) {
+      config.numbers[phone] = entry;
+    }
+    // If all blank, still register the number with empty entry
+    if (!config.numbers[phone]) config.numbers[phone] = '';
+
+    // 2. Skip Twilio webhook config for VAPI/Talkyto lines
+    if (vapiLine) {
+      console.log(`  ⊘  ${phone}${name ? `  "${name}"` : ''}  [VAPI/Talkyto — skipped]`);
+      continue;
+    }
+
+    // 3. Fetch from Twilio and set webhooks
     try {
       const results = await client.incomingPhoneNumbers.list({ phoneNumber: phone });
 
@@ -104,23 +139,22 @@ async function run() {
       const isVapiVoice = (num.voiceUrl || '').toLowerCase().includes('vapi');
       const isVapiSms = (num.smsUrl || '').toLowerCase().includes('vapi');
 
+      if (isVapiVoice || isVapiSms) {
+        console.log(`  ⊘  ${phone}  [VAPI detected in Twilio config — skipped]`);
+        continue;
+      }
+
       const update = {};
-      if (hasSms && !isVapiSms) {
-        update.smsUrl = smsWebhookUrl;
-        update.smsMethod = 'POST';
-      }
-      if (hasVoice && !isVapiVoice) {
-        update.voiceUrl = voiceWebhookUrl;
-        update.voiceMethod = 'POST';
-      }
+      if (hasSms) { update.smsUrl = smsWebhookUrl; update.smsMethod = 'POST'; }
+      if (hasVoice) { update.voiceUrl = voiceWebhookUrl; update.voiceMethod = 'POST'; }
 
       if (Object.keys(update).length > 0) {
         await client.incomingPhoneNumbers(num.sid).update(update);
       }
 
       const caps = [
-        hasSms ? (isVapiSms ? 'SMS(vapi-skip)' : 'SMS') : null,
-        hasVoice ? (isVapiVoice ? 'VOICE(vapi-skip)' : 'VOICE') : null,
+        hasSms ? 'SMS' : null,
+        hasVoice ? 'VOICE' : null,
       ].filter(Boolean).join('+') || 'NONE';
 
       const label = name ? `  "${name}"` : '';

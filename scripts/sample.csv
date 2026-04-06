@@ -1,4 +1,5 @@
-phone_number,friendly_name,channel_id
-+15103137237,Darwin OPS,C0AQN4ELYTF
-+5519933007190,Brazil Line 1,C0AQN4ELYTF
-+525595494294,MX Test,C0AQN4ELYTF
+phone_number,friendly_name,channel_id,routing,sms,voice
++15103137237,Darwin OPS,C0AQN4ELYTF,walkietalkie,yes,yes
++5519933007190,Brazil Line 1,C0AQN4ELYTF,walkietalkie,yes,no
++525595494294,MX Test,C0AQN4ELYTF,walkietalkie,no,yes
++525541634140,MX VAPI Line,,vapi,,

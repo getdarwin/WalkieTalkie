@@ -81,4 +81,14 @@ function removeNumber(phoneNumber) {
   saveConfig(config);
 }
 
-module.exports = { loadConfig, getFriendlyName, getChannel, setNumber, removeNumber };
+/**
+ * Replaces the entire number directory with the provided map.
+ * Used by the CSV bulk-upload flow.
+ *
+ * @param {Record<string, string|{name:string,channel:string}>} numbersMap
+ */
+function replaceAllNumbers(numbersMap) {
+  saveConfig({ numbers: numbersMap });
+}
+
+module.exports = { loadConfig, saveConfig, getFriendlyName, getChannel, setNumber, removeNumber, replaceAllNumbers };

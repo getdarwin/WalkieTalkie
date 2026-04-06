@@ -18,6 +18,7 @@ function saveSettings(data) {
   const dir = path.dirname(SETTINGS_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(data, null, 2));
+  try { fs.chmodSync(SETTINGS_PATH, 0o600); } catch {} // restrict to owner only
 }
 
 // ─── Dot-path helpers ─────────────────────────────────────────────────────────
