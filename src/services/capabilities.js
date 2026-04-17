@@ -158,6 +158,45 @@ function initCapabilitiesSync() {
   }
 }
 
+/**
+ * Points a single number's Twilio webhooks at this WalkieTalkie instance.
+ * Uses the cached SID if available, otherwise fetches from Twilio first.
+ *
+ * @param {string} phone  E.164 number
+ * @returns {Promise<{ sms: boolean, voice: boolean }>} capabilities that were connected
+ */
+async function connectNumberToWalkieTalkie(phone) {
+  const baseUrl = process.env.WEBHOOK_BASE_URL;
+  if (!baseUrl) throw new Error('WEBHOOK_BASE_URL is not configured');
+
+  let record = loadCapabilities().numbers[phone];
+  if (!record) {
+    record = await fetchSingleCapability(phone);
+  }
+  if (!record) throw new Error(`Number ${phone} not found in Twilio account`);
+
+  const { sid, capabilities } = record;
+  const update = {};
+  if (capabilities.sms) {
+    update.smsUrl = `${baseUrl}/twilio-webhook`;
+    update.smsMethod = 'POST';
+  }
+  if (capabilities.voice) {
+    update.voiceUrl = `${baseUrl}/twilio-voice`;
+    update.voiceMethod = 'POST';
+  }
+
+  if (Object.keys(update).length === 0) {
+    throw new Error(`Number ${phone} has no SMS or voice capabilities to connect`);
+  }
+
+  const client = makeClient();
+  await client.incomingPhoneNumbers(sid).update(update);
+
+  console.log(`[capabilities] Connected ${phone} → WalkieTalkie (sms:${!!capabilities.sms} voice:${!!capabilities.voice})`);
+  return { sms: !!capabilities.sms, voice: !!capabilities.voice };
+}
+
 module.exports = {
   initCapabilitiesSync,
   syncAllCapabilities,
@@ -165,4 +204,5 @@ module.exports = {
   getCapabilities,
   loadCapabilities,
   saveCapabilities,
+  connectNumberToWalkieTalkie,
 };

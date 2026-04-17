@@ -1,7 +1,7 @@
 const { App, ExpressReceiver } = require('@slack/bolt');
 const { setSetting, getSetting } = require('../services/settings');
 const { setNumber, removeNumber, loadConfig, replaceAllNumbers } = require('../services/numbers');
-const { syncAllCapabilities } = require('../services/capabilities');
+const { syncAllCapabilities, connectNumberToWalkieTalkie } = require('../services/capabilities');
 const {
   buildAppHomeView,
   buildCredentialsModal,
@@ -49,6 +49,27 @@ async function notify(client, userId, text) {
 }
 
 const E164_RE = /^\+[1-9]\d{7,14}$/;
+
+/**
+ * Normalizes a phone number string to E.164 format.
+ * Strips spaces, dashes, dots, parentheses, then prepends + if missing.
+ *
+ * Examples:
+ *   "+52 999 489 0783"  → "+529994890783"
+ *   "+52-999-489-0783"  → "+529994890783"
+ *   "52 999 489 0783"   → "+529994890783"
+ *   "(1) 800.555.1234"  → "+18005551234"
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+function normalizePhone(raw) {
+  if (!raw) return '';
+  const trimmed = raw.trim();
+  const hasPlus = trimmed.startsWith('+');
+  const digits = trimmed.replace(/\D/g, '');
+  return hasPlus ? `+${digits}` : `+${digits}`;
+}
 
 /**
  * Parse a CSV string (with header row) into an array of row objects.
@@ -117,6 +138,15 @@ boltApp.action('action_add_number', async ({ ack, client, body }) => {
   }
 });
 
+boltApp.action('action_add_number', async ({ ack, client, body }) => {
+  await ack();
+  try {
+    await client.views.open({ trigger_id: body.trigger_id, view: buildNumberModal() });
+  } catch (err) {
+    console.error('[bolt] Failed to open add number modal:', err.message);
+  }
+});
+
 boltApp.action('action_upload_csv', async ({ ack, client, body }) => {
   await ack();
   try {
@@ -154,7 +184,16 @@ boltApp.action(/^action_number_menu__/, async ({ ack, client, body, action }) =>
     const routing = (entry && typeof entry === 'object' && entry.routing) || 'walkietalkie';
     const isExternal = EXTERNAL_ROUTING_PROVIDERS.has(routing.toLowerCase());
 
-    if (op === 'edit' && isExternal) {
+    if (op === 'connect') {
+      try {
+        const caps = await connectNumberToWalkieTalkie(phone);
+        const connected = [caps.sms ? 'SMS' : null, caps.voice ? 'Voice' : null].filter(Boolean).join(' + ');
+        await notify(client, body.user.id, `✓ *${name || phone}* conectado a WalkieTalkie — ${connected} activo`);
+      } catch (err) {
+        console.error(`[bolt] Failed to connect ${phone}:`, err.message);
+        await notify(client, body.user.id, `❌ No se pudo conectar *${name || phone}*: ${err.message}`);
+      }
+    } else if (op === 'edit' && isExternal) {
       await client.views.open({
         trigger_id: body.trigger_id,
         view: buildExternalRoutingModal(phone, name, routing),

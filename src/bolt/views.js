@@ -128,6 +128,12 @@ function buildAppHomeView() {
     {
       type: 'actions',
       elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '➕ Add Line', emoji: true },
+          action_id: 'action_add_number',
+          style: 'primary',
+        },
         ...(baseUrl ? [{
           type: 'button',
           text: { type: 'plain_text', text: '⬇️ Download CSV', emoji: true },
@@ -138,7 +144,6 @@ function buildAppHomeView() {
           type: 'button',
           text: { type: 'plain_text', text: '⬆️ Upload CSV', emoji: true },
           action_id: 'action_upload_csv',
-          style: 'primary',
         },
       ],
     },
@@ -153,12 +158,13 @@ function buildAppHomeView() {
       const name = typeof entry === 'string' ? entry : (entry.name || '');
       const channel = typeof entry === 'object' ? entry.channel : null;
       const routing = (entry && typeof entry === 'object' && entry.routing) || 'walkietalkie';
+      const isExternal = ['vapi', 'talkyto', 'pipecat'].includes(routing.toLowerCase());
       const channelDisplay = channel ? `<#${channel}>` : (defaultChannel ? `<#${defaultChannel}> _(default)_` : '_no channel_');
       const cap = caps.numbers[phone];
       const capBadges = cap
         ? [cap.capabilities.sms ? 'SMS' : null, cap.capabilities.voice ? 'VOICE' : null].filter(Boolean).join(' · ') || 'no caps'
         : '_not scanned_';
-      const routingBadge = routing === 'vapi' ? '  `VAPI`' : '';
+      const routingBadge = isExternal ? `  \`${routing.toUpperCase()}\`` : '';
 
       blocks.push({
         type: 'section',
@@ -171,6 +177,7 @@ function buildAppHomeView() {
           action_id: `action_number_menu__${phone}`,
           options: [
             { text: { type: 'plain_text', text: '✏️ Edit', emoji: true }, value: `edit__${phone}` },
+            ...(!isExternal ? [{ text: { type: 'plain_text', text: '🔗 Conectar a WalkieTalkie', emoji: true }, value: `connect__${phone}` }] : []),
             { text: { type: 'plain_text', text: '🗑 Remove', emoji: true }, value: `remove__${phone}` },
           ],
         },
@@ -445,11 +452,17 @@ function buildLogsModal(logs = []) {
 
     let detail = `From: \`${entry.from || '?'}\``;
     if (entry.otp) detail += `  ·  OTP: \`${entry.otp}\``;
+    if (isVoice && entry.duration) detail += `  ·  ${entry.duration}s`;
     if (isSms && entry.body) {
-      const snippet = entry.body.length > 60 ? entry.body.slice(0, 60) + '…' : entry.body;
+      const snippet = entry.body.length > 200 ? entry.body.slice(0, 200) + '…' : entry.body;
       detail += `\n_"${snippet}"_`;
     }
-    if (isVoice && entry.duration) detail += `  ·  ${entry.duration}s`;
+    if (isVoice && entry.transcript) {
+      const snippet = entry.transcript.length > 200 ? entry.transcript.slice(0, 200) + '…' : entry.transcript;
+      detail += `\n_"${snippet}"_`;
+    } else if (isVoice && entry.status === 'success' && !entry.transcript) {
+      detail += `\n_sin transcripción_`;
+    }
     if (entry.status === 'error') detail += `\n⚠️ ${entry.error || 'error'}`;
 
     blocks.push({
