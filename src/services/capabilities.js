@@ -44,6 +44,8 @@ function buildRecord(num) {
       mms: !!(num.capabilities && num.capabilities.mms),
       fax: !!(num.capabilities && num.capabilities.fax),
     },
+    smsUrl: num.smsUrl || null,
+    voiceUrl: num.voiceUrl || null,
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -199,10 +201,12 @@ async function connectNumberToWalkieTalkie(phone) {
   if (capabilities.sms) {
     update.smsUrl = `${baseUrl}/twilio-webhook`;
     update.smsMethod = 'POST';
+    update.smsApplicationSid = '';  // clear any TwiML App that may override the URL
   }
   if (capabilities.voice) {
     update.voiceUrl = `${baseUrl}/twilio-voice`;
     update.voiceMethod = 'POST';
+    update.voiceApplicationSid = '';  // clear any TwiML App that may override the URL
   }
 
   if (Object.keys(update).length === 0) {

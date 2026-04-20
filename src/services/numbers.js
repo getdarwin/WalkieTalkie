@@ -47,6 +47,35 @@ function getChannel(phoneNumber) {
   return getSetting('slack.defaultChannel');
 }
 
+/**
+ * Returns the DTMF digits to auto-press when a call arrives on this number.
+ * Returns null if not configured.
+ * Used for IVR auto-response (e.g. pressing "1" for WhatsApp verification codes).
+ *
+ * @param {string} phoneNumber  E.164 format
+ * @returns {string|null}
+ */
+function getDtmf(phoneNumber) {
+  const { numbers } = loadConfig();
+  const entry = numbers[phoneNumber];
+  if (entry && typeof entry === 'object' && entry.dtmf) return entry.dtmf;
+  return null;
+}
+
+/**
+ * Returns the transcription language ISO-639-1 code for a number (e.g. "es", "pt").
+ * Returns null if not configured — Whisper will auto-detect.
+ *
+ * @param {string} phoneNumber  E.164 format
+ * @returns {string|null}
+ */
+function getLanguage(phoneNumber) {
+  const { numbers } = loadConfig();
+  const entry = numbers[phoneNumber];
+  if (entry && typeof entry === 'object' && entry.language) return entry.language;
+  return null;
+}
+
 // ─── Write ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -56,16 +85,22 @@ function getChannel(phoneNumber) {
  * @param {string} phoneNumber  E.164 format
  * @param {{ name?: string, channel?: string }} opts
  */
-function setNumber(phoneNumber, { name = '', channel = '' } = {}) {
+function setNumber(phoneNumber, { name = '', channel = '', dtmf = '', language = '' } = {}) {
   const config = loadConfig();
-  if (name && channel) {
-    config.numbers[phoneNumber] = { name, channel };
-  } else if (name) {
-    config.numbers[phoneNumber] = name;
-  } else if (channel) {
-    config.numbers[phoneNumber] = { name: '', channel };
-  } else {
+  delete config.numbers[phoneNumber]; // move to end so .reverse() shows it first in App Home
+  const entry = {};
+  if (name) entry.name = name;
+  if (channel) entry.channel = channel;
+  if (dtmf) entry.dtmf = dtmf;
+  if (language) entry.language = language;
+
+  const keys = Object.keys(entry);
+  if (keys.length === 0) {
     config.numbers[phoneNumber] = '';
+  } else if (keys.length === 1 && entry.name) {
+    config.numbers[phoneNumber] = name; // backward compat: plain string when only name
+  } else {
+    config.numbers[phoneNumber] = entry;
   }
   saveConfig(config);
 }
@@ -91,4 +126,4 @@ function replaceAllNumbers(numbersMap) {
   saveConfig({ numbers: numbersMap });
 }
 
-module.exports = { loadConfig, saveConfig, getFriendlyName, getChannel, setNumber, removeNumber, replaceAllNumbers };
+module.exports = { loadConfig, saveConfig, getFriendlyName, getChannel, getDtmf, getLanguage, setNumber, removeNumber, replaceAllNumbers };

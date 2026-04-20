@@ -11,6 +11,9 @@ const {
   buildConfirmRemoveModal,
   buildLogsModal,
   buildExternalRoutingModal,
+  buildCsvConfirmModal,
+  buildConnectModal,
+  buildFindLineModal,
 } = require('./views');
 const { loadLogs } = require('../services/logger');
 
@@ -26,16 +29,19 @@ const boltApp = new App({
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-async function publishAppHome(client, userId) {
+async function publishAppHome(client, userId, options = {}) {
   try {
     await client.views.publish({
       user_id: userId,
-      view: buildAppHomeView(),
+      view: buildAppHomeView(options),
     });
   } catch (err) {
     console.error('[bolt] Failed to publish App Home:', err.message);
   }
 }
+
+// Holds parsed CSV data between the upload modal and the confirm modal
+const pendingCsvUploads = new Map(); // userId → { numbersMap, rowCount, rows }
 
 /** Post an ephemeral confirmation message to the user in the default channel. */
 async function notify(client, userId, text) {
@@ -123,19 +129,15 @@ boltApp.action('action_edit_default_channel', async ({ ack, client, body }) => {
 
 boltApp.action('action_sync_twilio', async ({ ack, client, body }) => {
   await ack();
+  await publishAppHome(client, body.user.id, {
+    statusText: ':arrows_counterclockwise: Sincronizando números de Twilio...',
+  });
   syncAllCapabilities()
-    .then(() => publishAppHome(client, body.user.id))
-    .catch((err) => console.error('[bolt] Sync failed:', err.message));
-  await publishAppHome(client, body.user.id);
-});
-
-boltApp.action('action_add_number', async ({ ack, client, body }) => {
-  await ack();
-  try {
-    await client.views.open({ trigger_id: body.trigger_id, view: buildNumberModal() });
-  } catch (err) {
-    console.error('[bolt] Failed to open add number modal:', err.message);
-  }
+    .then(() => publishAppHome(client, body.user.id, { statusText: ':white_check_mark: Sync completo.' }))
+    .catch((err) => {
+      console.error('[bolt] Sync failed:', err.message);
+      publishAppHome(client, body.user.id, { statusText: `:x: Sync falló: ${err.message}` });
+    });
 });
 
 boltApp.action('action_add_number', async ({ ack, client, body }) => {
@@ -158,6 +160,24 @@ boltApp.action('action_upload_csv', async ({ ack, client, body }) => {
 
 // No-op ack for the download button (it's a URL link — Slack still sends an action)
 boltApp.action('action_download_csv', async ({ ack }) => { await ack(); });
+
+boltApp.action('action_connect_line', async ({ ack, client, body }) => {
+  await ack();
+  try {
+    await client.views.open({ trigger_id: body.trigger_id, view: buildConnectModal() });
+  } catch (err) {
+    console.error('[bolt] Failed to open connect modal:', err.message);
+  }
+});
+
+boltApp.action('action_find_edit_line', async ({ ack, client, body }) => {
+  await ack();
+  try {
+    await client.views.open({ trigger_id: body.trigger_id, view: buildFindLineModal() });
+  } catch (err) {
+    console.error('[bolt] Failed to open find-edit modal:', err.message);
+  }
+});
 
 boltApp.action('action_view_logs', async ({ ack, client, body }) => {
   await ack();
@@ -188,11 +208,14 @@ boltApp.action(/^action_number_menu__/, async ({ ack, client, body, action }) =>
       try {
         const caps = await connectNumberToWalkieTalkie(phone);
         const connected = [caps.sms ? 'SMS' : null, caps.voice ? 'Voice' : null].filter(Boolean).join(' + ');
-        await publishAppHome(client, body.user.id);
-        await notify(client, body.user.id, `✓ *${name || phone}* conectado a WalkieTalkie — ${connected} activo`);
+        await publishAppHome(client, body.user.id, {
+          statusText: `:white_check_mark: *${name || phone}* conectado a WalkieTalkie — ${connected} activo`,
+        });
       } catch (err) {
         console.error(`[bolt] Failed to connect ${phone}:`, err.message);
-        await publishAppHome(client, body.user.id);
+        await publishAppHome(client, body.user.id, {
+          statusText: `:x: No se pudo conectar *${name || phone}*: ${err.message}`,
+        });
         // Post a rich ephemeral with a re-sync button so the user can recover
         const channel = getSetting('slack.defaultChannel');
         if (channel) {
@@ -259,16 +282,14 @@ boltApp.view('modal_credentials', async ({ ack, view, client, body }) => {
   if (accountSid) setSetting('twilio.accountSid', accountSid);
   if (authToken) setSetting('twilio.authToken', authToken);
 
-  await publishAppHome(client, body.user.id);
-  await notify(client, body.user.id, '✓ Twilio credentials updated.');
+  await publishAppHome(client, body.user.id, { statusText: ':white_check_mark: Credenciales de Twilio actualizadas.' });
 });
 
 boltApp.view('modal_default_channel', async ({ ack, view, client, body }) => {
   await ack();
   const channel = view.state.values.block_default_channel.input_default_channel.selected_channel;
   if (channel) setSetting('slack.defaultChannel', channel);
-  await publishAppHome(client, body.user.id);
-  await notify(client, body.user.id, '✓ Default channel updated.');
+  await publishAppHome(client, body.user.id, { statusText: ':white_check_mark: Canal default actualizado.' });
 });
 
 boltApp.view('modal_number', async ({ ack, view, client, body }) => {
@@ -276,6 +297,8 @@ boltApp.view('modal_number', async ({ ack, view, client, body }) => {
   const phone = normalizePhone(values.block_phone.input_phone.value || '');
   const name = values.block_name.input_name.value?.trim() || '';
   const channel = values.block_channel.input_channel?.selected_channel || '';
+  const dtmf = values.block_dtmf?.input_dtmf?.value?.trim() || '';
+  const language = values.block_language?.input_language?.selected_option?.value || '';
   const connectChecked = values.block_connect?.input_connect?.selected_options?.some((o) => o.value === 'connect') ?? false;
 
   if (!E164_RE.test(phone)) {
@@ -289,7 +312,7 @@ boltApp.view('modal_number', async ({ ack, view, client, body }) => {
   }
 
   await ack();
-  setNumber(phone, { name, channel });
+  setNumber(phone, { name, channel, dtmf, language });
 
   let notifText = `✓ ${phone}${name ? ` (${name})` : ''} guardado.`;
 
@@ -304,19 +327,93 @@ boltApp.view('modal_number', async ({ ack, view, client, body }) => {
     }
   }
 
-  await publishAppHome(client, body.user.id);
-  await notify(client, body.user.id, notifText);
+  await publishAppHome(client, body.user.id, { statusText: `:white_check_mark: ${notifText}` });
 });
 
 boltApp.view('modal_confirm_remove', async ({ ack, view, client, body }) => {
   await ack();
   const phone = view.private_metadata;
   if (phone) removeNumber(phone);
-  await publishAppHome(client, body.user.id);
-  await notify(client, body.user.id, `✓ ${phone} removed from the directory.`);
+  await publishAppHome(client, body.user.id, { statusText: `:white_check_mark: ${phone} eliminado del directorio.` });
 });
 
-boltApp.view('modal_csv_upload', async ({ ack, view, client, body }) => {
+boltApp.view('modal_connect_line', async ({ ack, view, client, body }) => {
+  const raw = view.state.values.block_phone.input_phone.value || '';
+  const phone = normalizePhone(raw);
+
+  if (!E164_RE.test(phone)) {
+    await ack({
+      response_action: 'errors',
+      errors: { block_phone: 'No se pudo parsear como número válido. Incluye el código de país, e.g. +52 999 489 0783.' },
+    });
+    return;
+  }
+
+  await ack();
+
+  try {
+    const caps = await connectNumberToWalkieTalkie(phone);
+    const connected = [caps.sms ? 'SMS' : null, caps.voice ? 'Voice' : null].filter(Boolean).join(' + ');
+    // Ensure number exists in directory so DTMF, name, and channel can be configured
+    const { numbers } = loadConfig();
+    if (!(phone in numbers)) {
+      setNumber(phone, {});
+    }
+    await publishAppHome(client, body.user.id, {
+      statusText: `:white_check_mark: *${phone}* conectado a WalkieTalkie — ${connected} activo. Usa ✏️ Edit para agregar nombre, canal o DTMF.`,
+    });
+  } catch (err) {
+    console.error(`[bolt] Failed to connect ${phone} via connect modal:`, err.message);
+    await publishAppHome(client, body.user.id, {
+      statusText: `:x: No se pudo conectar *${phone}*: ${err.message}`,
+    });
+  }
+});
+
+boltApp.view('modal_find_line', async ({ ack, view }) => {
+  const raw = view.state.values.block_phone.input_phone.value || '';
+  const phone = normalizePhone(raw);
+
+  if (!E164_RE.test(phone)) {
+    await ack({
+      response_action: 'errors',
+      errors: { block_phone: 'Formato de número inválido. Incluye el código de país, e.g. +52 999 489 0783.' },
+    });
+    return;
+  }
+
+  const { numbers } = loadConfig();
+  const entry = numbers[phone] ?? null;
+
+  await ack({
+    response_action: 'push',
+    view: buildNumberModal(phone, entry),
+  });
+});
+
+/** Converts a validated array of CSV row objects into the numbers.json map format. */
+function buildNumbersMapFromRows(rows) {
+  const numbersMap = {};
+  for (const row of rows) {
+    const phone = row.phone_number;
+    const name = row.friendly_name || '';
+    const channel = row.channel_id || '';
+    const routing = (row.routing || '').toLowerCase().trim();
+    const isVapi = routing === 'vapi' || routing === 'talkyto';
+
+    const entry = {};
+    if (name) entry.name = name;
+    if (channel) entry.channel = channel;
+    if (isVapi) entry.routing = 'vapi';
+
+    if (Object.keys(entry).length === 0) numbersMap[phone] = '';
+    else if (Object.keys(entry).length === 1 && entry.name) numbersMap[phone] = name;
+    else numbersMap[phone] = entry;
+  }
+  return numbersMap;
+}
+
+boltApp.view('modal_csv_upload', async ({ ack, view, body }) => {
   const csvText = view.state.values.block_csv.input_csv.value || '';
   const rows = parseCSVString(csvText);
 
@@ -345,30 +442,30 @@ boltApp.view('modal_csv_upload', async ({ ack, view, client, body }) => {
     return;
   }
 
+  // Store parsed data and push a confirmation modal — don't apply yet
+  const numbersMap = buildNumbersMapFromRows(rows);
+  pendingCsvUploads.set(body.user.id, { numbersMap, rowCount: rows.length, rows });
+
+  await ack({
+    response_action: 'push',
+    view: buildCsvConfirmModal(rows.length, rows),
+  });
+});
+
+boltApp.view('modal_csv_confirm', async ({ ack, client, body }) => {
   await ack();
-
-  // Build the numbers map from CSV rows
-  const numbersMap = {};
-  for (const row of rows) {
-    const phone = row.phone_number;
-    const name = row.friendly_name || '';
-    const channel = row.channel_id || '';
-    const routing = (row.routing || '').toLowerCase().trim();
-    const isVapi = routing === 'vapi' || routing === 'talkyto';
-
-    const entry = {};
-    if (name) entry.name = name;
-    if (channel) entry.channel = channel;
-    if (isVapi) entry.routing = 'vapi';
-
-    if (Object.keys(entry).length === 0) numbersMap[phone] = '';
-    else if (Object.keys(entry).length === 1 && entry.name) numbersMap[phone] = name;
-    else numbersMap[phone] = entry;
+  const pending = pendingCsvUploads.get(body.user.id);
+  if (!pending) {
+    await publishAppHome(client, body.user.id, {
+      statusText: ':warning: Sesión de carga expiró — intenta de nuevo.',
+    });
+    return;
   }
-
-  replaceAllNumbers(numbersMap);
-  await publishAppHome(client, body.user.id);
-  await notify(client, body.user.id, `✓ Number directory updated — ${rows.length} line${rows.length !== 1 ? 's' : ''} loaded from CSV.`);
+  pendingCsvUploads.delete(body.user.id);
+  replaceAllNumbers(pending.numbersMap);
+  await publishAppHome(client, body.user.id, {
+    statusText: `:white_check_mark: Directorio actualizado — ${pending.rowCount} línea${pending.rowCount !== 1 ? 's' : ''} cargadas.`,
+  });
 });
 
 module.exports = { boltApp, receiver };

@@ -249,6 +249,16 @@ Nothing to configure once the server is running. When someone sends an SMS to a 
 - OTP codes (4–8 digit numbers) are **broadcast to the channel** so they're visible without clicking the thread
 - Voice calls show a 📞 message with the MP3 attached and a transcript below it
 
+### What you see in the number list
+
+Each line in the directory shows:
+- **Name** and phone number
+- → Channel it posts to
+- Capability badges: `SMS`, `VOICE`
+- Connection badge: 🟢 webhooks point to this server · 🔴 not connected · no badge = not scanned yet or external routing
+
+The list shows the 10 most recently added lines. Use **⬇️ Download CSV** to see all.
+
 ### Managing lines from App Home
 
 **Add a new line:**
@@ -257,19 +267,24 @@ Nothing to configure once the server is running. When someone sends an SMS to a 
 3. Enter a friendly name (optional but recommended — shown in Slack threads)
 4. Select a Slack channel override (optional — leave blank to use the default)
 5. Leave **Conectar a WalkieTalkie** checked to immediately point the Twilio webhooks at this server
-6. Click **Save**
+6. Click **Save** — a banner at the top of App Home confirms the result
+
+**Connect any line (including those not visible in the list):**
+- Click **🔗 Connect** in the directory bar
+- Enter the phone number in any format
+- Click **Conectar** — the Twilio webhooks are updated immediately
+- Works for any number in your Twilio account, even if it uses a TwiML App (Talkyto, etc.)
+
+**Connect a visible line:**
+- Click the `⋮` overflow menu on any line → **🔗 Conectar a WalkieTalkie**
 
 **Edit or remove a line:**
-- Click the `⋮` overflow menu on any line in the number list → **✏️ Edit** or **🗑 Remove**
-
-**Connect an existing line:**
-- Click `⋮` on any line → **🔗 Conectar a WalkieTalkie**
-- This updates the Twilio webhook URLs so calls and SMS go to this server
-- If the number isn't found in Twilio, you'll see a "🔄 Sync Twilio Numbers" button — click it to refresh and try again
+- Click `⋮` → **✏️ Edit** (or **ℹ️ Info** for externally-routed numbers) or **🗑 Remove**
 
 **Sync with Twilio:**
-- Click **🔄 Sync Twilio Numbers** to refresh capabilities (SMS/Voice/MMS flags per number)
-- Numbers whose Twilio webhooks already point to this server are automatically added to the directory
+- Click **🔄 Sync Twilio Numbers** — the button shows "Sincronizando..." while running, then "✅ Sync completo"
+- Refreshes SMS/Voice/MMS capabilities and updates the 🟢/🔴 connection badges
+- Numbers whose webhooks already point to this server are automatically added to the directory
 
 **View recent activity:**
 - Click **📋 Activity Log** to see the last 20 SMS and voice transactions
@@ -289,6 +304,7 @@ Nothing to configure once the server is running. When someone sends an SMS to a 
 3. Edit `friendly_name`, `channel_id`, `routing` columns
 4. Export as CSV
 5. Click **⬆️ Upload CSV** → paste the CSV content → click **Apply**
+6. A confirmation modal shows a preview of the first 5 rows and warns that the current directory will be replaced — click **Reemplazar directorio** to confirm
 
 > Numbers with `routing=vapi`, `routing=talkyto`, or `routing=pipecat` are saved to the directory but their Twilio webhook URLs are never touched.
 

@@ -2,7 +2,7 @@ const express = require('express');
 const { WebClient } = require('@slack/web-api');
 const Groq = require('groq-sdk');
 const twilioValidate = require('../middleware/twilioValidate');
-const { getFriendlyName, getChannel } = require('../services/numbers');
+const { getFriendlyName, getChannel, getDtmf, getLanguage } = require('../services/numbers');
 const { checkAndCacheCapabilities } = require('../services/capabilities');
 const { saveCallThread, getCallThread } = require('../services/callThreads');
 const { logTransaction } = require('../services/logger');
@@ -61,7 +61,7 @@ async function uploadAudioToSlack({ channel, threadTs, buffer, filename, duratio
  * @param {string} filename
  * @returns {Promise<string|null>}
  */
-async function transcribeWithGroq(buffer, filename) {
+async function transcribeWithGroq(buffer, filename, language = null) {
   if (!process.env.GROQ_API_KEY) return null;
 
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -73,6 +73,7 @@ async function transcribeWithGroq(buffer, filename) {
     file,
     model: 'whisper-large-v3-turbo',
     response_format: 'text',
+    ...(language ? { language } : {}),
   });
 
   return typeof result === 'string' ? result.trim() : null;
@@ -102,11 +103,18 @@ router.post('/', twilioValidate, async (req, res) => {
     console.error('[voice] Failed to post call start to Slack:', err.message);
   }
 
-  // Record silently — no beep, no greeting
+  // Auto-press DTMF if configured for this number (e.g. "1" for WhatsApp verification codes)
+  const dtmf = getDtmf(To);
+  const dtmfTwiml = dtmf
+    ? `<Pause length="3"/><Play digits="${dtmf}"/><Pause length="1"/>`
+    : '';
+
   const baseUrl = process.env.WEBHOOK_BASE_URL;
   twimlResponse(res, `
+    ${dtmfTwiml}
     <Record
-      maxLength="120"
+      maxLength="300"
+      timeout="10"
       action="${baseUrl}/twilio-voice/recording"
       playBeep="false"
     />
@@ -130,6 +138,7 @@ router.post('/recording', twilioValidate, async (req, res) => {
   }
 
   const duration = parseInt(RecordingDuration) || 0;
+  const language = getLanguage(thread.toNumber);
 
   try {
     const { buffer } = await downloadRecording(RecordingUrl);
@@ -138,7 +147,7 @@ router.post('/recording', twilioValidate, async (req, res) => {
     // Upload audio + transcribe in parallel
     const [, transcript] = await Promise.all([
       uploadAudioToSlack({ channel: thread.channel, threadTs: thread.threadTs, buffer, filename, duration }),
-      transcribeWithGroq(buffer, filename),
+      transcribeWithGroq(buffer, filename, language),
     ]);
 
     console.log(`[voice] Audio uploaded to Slack  CallSid=${CallSid}`);
