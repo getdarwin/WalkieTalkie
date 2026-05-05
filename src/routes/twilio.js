@@ -27,7 +27,8 @@ router.post('/', twilioValidate, async (req, res) => {
     return res.status(400).type('text').send('Bad Request');
   }
 
-  console.log(`[twilio] SMS received  To=${To}  From=${From}  Body="${Body}"`);
+  const bodyPreview = Body.length > 0 ? `<${Body.length} chars>` : '(empty)';
+  console.log(`[twilio] SMS received  To=${To}  From=${From}  Body=${bodyPreview}`);
 
   // Fire-and-forget: cache capabilities for any number not yet in the store
   checkAndCacheCapabilities(To).catch(() => {});
