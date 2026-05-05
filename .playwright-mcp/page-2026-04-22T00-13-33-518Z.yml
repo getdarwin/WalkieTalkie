@@ -1,0 +1,43 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - progressbar [ref=e6]
+      - main [ref=e14]:
+        - generic [ref=e15]:
+          - img [ref=e18]
+          - generic [ref=e23]:
+            - heading "Inicia sesión" [level=1] [ref=e24]
+            - generic [ref=e25]: con tu cuenta de Google para ir a Documentos de Google. Esta cuenta estará disponible para otras apps de Google en el navegador.
+        - generic [ref=e28]:
+          - generic [ref=e33]:
+            - generic [ref=e38]:
+              - textbox "Correo electrónico o teléfono" [active] [ref=e39]
+              - generic: Correo electrónico o teléfono
+            - button "¿Has olvidado tu correo electrónico?" [ref=e43] [cursor=pointer]
+          - generic [ref=e46]:
+            - text: ¿No es tu ordenador? Usa el modo Invitado para iniciar sesión de forma privada.
+            - link "Más información sobre cómo usar el modo Invitado" [ref=e47] [cursor=pointer]:
+              - /url: https://support.google.com/chrome/answer/6130773?hl=es
+        - generic [ref=e49]:
+          - button "Siguiente" [ref=e53]:
+            - generic [ref=e56]: Siguiente
+          - button "Crear cuenta" [ref=e62]:
+            - generic [ref=e65]: Crear cuenta
+    - contentinfo [ref=e69]:
+      - combobox "Cómo cambiar de idioma Español (España)" [ref=e73] [cursor=pointer]:
+        - generic:
+          - generic: Español (España)
+        - generic:
+          - img
+      - list [ref=e75]:
+        - listitem [ref=e76]:
+          - link "Ayuda" [ref=e77] [cursor=pointer]:
+            - /url: https://support.google.com/accounts?hl=es&p=account_iph
+        - listitem [ref=e78]:
+          - link "Privacidad" [ref=e79] [cursor=pointer]:
+            - /url: https://accounts.google.com/TOS?loc=MX&hl=es&privacy=true
+        - listitem [ref=e80]:
+          - link "Términos" [ref=e81] [cursor=pointer]:
+            - /url: https://accounts.google.com/TOS?loc=MX&hl=es
+  - iframe [ref=e82]:
+    
