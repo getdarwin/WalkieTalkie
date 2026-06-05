@@ -72,7 +72,7 @@ app.get('/capabilities', adminAuth, (req, res) => {
 // Columns: phone_number, friendly_name, channel_id, routing, sms, voice
 //   routing: "walkietalkie" or "vapi" (detected from Twilio voiceUrl/smsUrl in capabilities cache)
 //   sms/voice: yes/no from capabilities cache (blank if not yet scanned)
-app.get('/numbers.csv', (_req, res) => {
+app.get('/numbers.csv', adminAuth, (req, res) => {
   const { numbers } = loadConfig();
   const caps = getCapabilities().numbers;
   const rows = ['phone_number,friendly_name,channel_id,routing,sms,voice'];

@@ -9,7 +9,24 @@
       "Bash(curl -s \"http://localhost:3000/logs?limit=20\")",
       "Bash(curl -s \"http://localhost:3000/capabilities\")",
       "Bash(ls /Users/forest/Documents/Developer/WalkieTalkie/*.md)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(gh auth *)",
+      "Bash(gh api *)",
+      "Bash(git add *)",
+      "Bash(curl -s http://localhost:3000/health)",
+      "Bash(npm audit *)",
+      "Bash(npm ls *)",
+      "Bash(grep -rn --include=\"*.js\" -E \"\\(ACsid|ACxxxxxxxxx|SK[a-zA-Z0-9]{30,}|xoxb-[0-9]|xoxp-[0-9]|ghp_|ghs_|AIza[0-9A-Za-z-_]{35}|AKIA[0-9A-Z]{16}\\)\" /Users/forest/Documents/Developer/WalkieTalkie/src/ /Users/forest/Documents/Developer/WalkieTalkie/scripts/)",
+      "Bash(grep -rn --include=\"*.js\" -E \"\\(password|passwd|secret|api_key|apikey|auth_token|authtoken|access_token|bearer\\)\\\\s*[=:]\\\\s*['\\\\\"][^'\\\\\"]{6,}['\\\\\"]\" /Users/forest/Documents/Developer/WalkieTalkie/src/ /Users/forest/Documents/Developer/WalkieTalkie/scripts/)",
+      "Bash(grep -iv \"process\\\\.env\\\\|placeholder\\\\|example\\\\|your_\\\\|<\\\\|>\\\\|\\\\${\")",
+      "Bash(grep -iv \"process\\\\.env\\\\|\\\\${\\\\|env\\\\[\")",
+      "Bash(grep -rn --include=\"*.js\" -E \"=['\\\\\"][A-Za-z0-9+/]{20,}['\\\\\"]\" /Users/forest/Documents/Developer/WalkieTalkie/src/ /Users/forest/Documents/Developer/WalkieTalkie/scripts/)",
+      "Bash(grep -v \"process\\\\.env\\\\|\\\\${\")",
+      "Bash(grep -v \"process\\\\.env\\\\|\\\\${settings\\\\|getSettings\\\\|//\\\\|description\\\\|label\\\\|placeholder\\\\|hint\\\\|text:\")",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git checkout *)",
+      "Bash(gh pr create --title 'fix: redact SMS body from logs, protect /numbers.csv with adminAuth' --body ' *)"
     ]
   }
 }

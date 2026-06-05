@@ -143,7 +143,7 @@ function buildAppHomeView({ statusText = null } = {}) {
         ...(baseUrl ? [{
           type: 'button',
           text: { type: 'plain_text', text: '⬇️ Download CSV', emoji: true },
-          url: `${baseUrl}/numbers.csv`,
+          url: `${baseUrl}/numbers.csv${process.env.ADMIN_SECRET ? `?secret=${encodeURIComponent(process.env.ADMIN_SECRET)}` : ''}`,
           action_id: 'action_download_csv',
         }] : []),
         {

@@ -1,4 +1,5 @@
 const twilio = require('twilio');
+const { getSetting } = require('../services/settings');
 
 /**
  * Middleware that validates every inbound request is genuinely from Twilio
@@ -10,7 +11,7 @@ const twilio = require('twilio');
  * Docs: https://www.twilio.com/docs/usage/webhooks/webhooks-security
  */
 function twilioValidate(req, res, next) {
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const authToken = getSetting('twilio.authToken');
   const signature = req.headers['x-twilio-signature'];
 
   if (!signature) {

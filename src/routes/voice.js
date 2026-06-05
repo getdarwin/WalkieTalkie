@@ -2,6 +2,7 @@ const express = require('express');
 const { WebClient } = require('@slack/web-api');
 const Groq = require('groq-sdk');
 const twilioValidate = require('../middleware/twilioValidate');
+const { getSetting } = require('../services/settings');
 const { getFriendlyName, getChannel, getDtmf, getLanguage } = require('../services/numbers');
 const { checkAndCacheCapabilities } = require('../services/capabilities');
 const { saveCallThread, getCallThread } = require('../services/callThreads');
@@ -24,7 +25,7 @@ function twimlResponse(res, xml = '') {
 async function downloadRecording(recordingUrl) {
   const url = `${recordingUrl}.mp3`;
   const auth = Buffer.from(
-    `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+    `${getSetting('twilio.accountSid')}:${getSetting('twilio.authToken')}`
   ).toString('base64');
 
   const response = await fetch(url, {
