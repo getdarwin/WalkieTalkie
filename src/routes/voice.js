@@ -8,6 +8,7 @@ const { checkAndCacheCapabilities } = require('../services/capabilities');
 const { saveCallThread, getCallThread } = require('../services/callThreads');
 const { logTransaction } = require('../services/logger');
 const { sendCallStartToSlack, postToThread, parseOtp, buildCallTranscriptBlocks } = require('../services/slack');
+const { backgroundTask } = require('../services/background');
 
 const router = express.Router();
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
@@ -24,9 +25,11 @@ function twimlResponse(res, xml = '') {
  */
 async function downloadRecording(recordingUrl) {
   const url = `${recordingUrl}.mp3`;
-  const auth = Buffer.from(
-    `${getSetting('twilio.accountSid')}:${getSetting('twilio.authToken')}`
-  ).toString('base64');
+  const [accountSid, authToken] = await Promise.all([
+    getSetting('twilio.accountSid'),
+    getSetting('twilio.authToken'),
+  ]);
+  const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
 
   const response = await fetch(url, {
     headers: { Authorization: `Basic ${auth}` },
@@ -92,20 +95,20 @@ router.post('/', twilioValidate, async (req, res) => {
 
   console.log(`[voice] Incoming call  To=${To}  From=${From}  CallSid=${CallSid}`);
 
-  checkAndCacheCapabilities(To).catch(() => {});
+  backgroundTask(checkAndCacheCapabilities(To));
 
-  const friendlyName = getFriendlyName(To);
-  const channel = getChannel(To);
+  const friendlyName = await getFriendlyName(To);
+  const channel = await getChannel(To);
 
   try {
     const threadTs = await sendCallStartToSlack({ channel, friendlyName, toNumber: To, fromNumber: From });
-    saveCallThread(CallSid, { channel, threadTs, toNumber: To, fromNumber: From, friendlyName });
+    await saveCallThread(CallSid, { channel, threadTs, toNumber: To, fromNumber: From, friendlyName });
   } catch (err) {
     console.error('[voice] Failed to post call start to Slack:', err.message);
   }
 
   // Auto-press DTMF if configured for this number (e.g. "1" for WhatsApp verification codes)
-  const dtmf = getDtmf(To);
+  const dtmf = await getDtmf(To);
   const dtmfTwiml = dtmf
     ? `<Pause length="3"/><Play digits="${dtmf}"/><Pause length="1"/>`
     : '';
@@ -129,17 +132,21 @@ router.post('/recording', twilioValidate, async (req, res) => {
 
   console.log(`[voice] Recording ready  CallSid=${CallSid}  Duration=${RecordingDuration}s`);
 
-  // Respond to Twilio immediately — download + upload happens after
+  // Respond to Twilio immediately — download + upload continues in the
+  // background (kept alive on Vercel via waitUntil).
   twimlResponse(res);
+  backgroundTask(processRecording(CallSid, RecordingUrl, RecordingDuration));
+});
 
-  const thread = getCallThread(CallSid);
+async function processRecording(CallSid, RecordingUrl, RecordingDuration) {
+  const thread = await getCallThread(CallSid);
   if (!thread) {
     console.warn(`[voice] No thread found for CallSid=${CallSid}`);
     return;
   }
 
   const duration = parseInt(RecordingDuration) || 0;
-  const language = getLanguage(thread.toNumber);
+  const language = await getLanguage(thread.toNumber);
 
   try {
     const { buffer } = await downloadRecording(RecordingUrl);
@@ -166,7 +173,7 @@ router.post('/recording', twilioValidate, async (req, res) => {
       console.log(`[voice] Transcript posted  otp=${otp || 'none'}`);
     }
 
-    logTransaction({
+    await logTransaction({
       type: 'voice-recording',
       to: thread.toNumber,
       from: thread.fromNumber,
@@ -181,7 +188,7 @@ router.post('/recording', twilioValidate, async (req, res) => {
     });
   } catch (err) {
     console.error('[voice] Failed to upload recording to Slack:', err.message);
-    logTransaction({
+    await logTransaction({
       type: 'voice-recording',
       to: thread.toNumber,
       from: thread.fromNumber,
@@ -193,6 +200,6 @@ router.post('/recording', twilioValidate, async (req, res) => {
       error: err.message,
     });
   }
-});
+}
 
 module.exports = router;

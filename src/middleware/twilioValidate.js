@@ -10,13 +10,20 @@ const { getSetting } = require('../services/settings');
  *
  * Docs: https://www.twilio.com/docs/usage/webhooks/webhooks-security
  */
-function twilioValidate(req, res, next) {
-  const authToken = getSetting('twilio.authToken');
+async function twilioValidate(req, res, next) {
   const signature = req.headers['x-twilio-signature'];
 
   if (!signature) {
     console.warn('[twilioValidate] Missing X-Twilio-Signature header — rejected');
     return res.status(403).type('text').send('Forbidden');
+  }
+
+  let authToken;
+  try {
+    authToken = await getSetting('twilio.authToken');
+  } catch (err) {
+    console.error('[twilioValidate] Failed to read auth token:', err.message);
+    return res.status(503).type('text').send('Service Unavailable');
   }
 
   // Reconstruct the full URL from the incoming request so it matches exactly

@@ -1,33 +1,12 @@
-const fs = require('fs');
-const path = require('path');
+const store = require('./store');
 
-const CALL_THREADS_PATH = path.join(__dirname, '../../data/call-threads.json');
-const MAX_ENTRIES = 500;
+// Call → thread mappings are short-lived: the recording callback arrives
+// minutes after the call. 7 days of TTL is generous headroom.
+const TTL_SECONDS = 7 * 24 * 60 * 60;
 
-// ─── File I/O ─────────────────────────────────────────────────────────────────
-
-function loadCallThreads() {
-  try {
-    if (!fs.existsSync(CALL_THREADS_PATH)) return {};
-    return JSON.parse(fs.readFileSync(CALL_THREADS_PATH, 'utf8'));
-  } catch {
-    return {};
-  }
+function keyFor(callSid) {
+  return `callthread:${callSid}`;
 }
-
-function pruneAndSave(store) {
-  const keys = Object.keys(store);
-  if (keys.length > MAX_ENTRIES) {
-    // Remove oldest entries (keys are insertion-ordered in V8)
-    const excess = keys.slice(0, keys.length - MAX_ENTRIES);
-    for (const key of excess) delete store[key];
-  }
-  const dir = path.dirname(CALL_THREADS_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(CALL_THREADS_PATH, JSON.stringify(store, null, 2));
-}
-
-// ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Persists a Slack thread reference for a Twilio call.
@@ -40,10 +19,8 @@ function pruneAndSave(store) {
  * @param {string} data.fromNumber    E.164 caller number
  * @param {string} data.friendlyName  Resolved friendly name
  */
-function saveCallThread(callSid, data) {
-  const store = loadCallThreads();
-  store[callSid] = { ...data, savedAt: new Date().toISOString() };
-  pruneAndSave(store);
+async function saveCallThread(callSid, data) {
+  await store.setJSON(keyFor(callSid), { ...data, savedAt: new Date().toISOString() }, TTL_SECONDS);
 }
 
 /**
@@ -51,11 +28,10 @@ function saveCallThread(callSid, data) {
  * Returns null if not found.
  *
  * @param {string} callSid
- * @returns {{ channel, threadTs, toNumber, fromNumber, friendlyName } | null}
+ * @returns {Promise<{ channel, threadTs, toNumber, fromNumber, friendlyName } | null>}
  */
-function getCallThread(callSid) {
-  const store = loadCallThreads();
-  return store[callSid] || null;
+async function getCallThread(callSid) {
+  return store.getJSON(keyFor(callSid));
 }
 
 module.exports = { saveCallThread, getCallThread };

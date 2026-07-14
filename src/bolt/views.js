@@ -18,12 +18,18 @@ function relativeTime(isoString) {
  * Builds the full App Home Block Kit view.
  * Called on every home_opened event and after any config change.
  */
-function buildAppHomeView({ statusText = null } = {}) {
-  const accountSid = getSetting('twilio.accountSid') || '';
-  const authToken = getSetting('twilio.authToken') || '';
-  const defaultChannel = getSetting('slack.defaultChannel') || '';
-  const { numbers } = loadConfig();
-  const caps = getCapabilities();
+async function buildAppHomeView({ statusText = null } = {}) {
+  const [accountSidRaw, authTokenRaw, defaultChannelRaw, config, caps] = await Promise.all([
+    getSetting('twilio.accountSid'),
+    getSetting('twilio.authToken'),
+    getSetting('slack.defaultChannel'),
+    loadConfig(),
+    getCapabilities(),
+  ]);
+  const accountSid = accountSidRaw || '';
+  const authToken = authTokenRaw || '';
+  const defaultChannel = defaultChannelRaw || '';
+  const { numbers } = config;
   const numberCount = Object.keys(numbers).length;
 
   const maskedToken = authToken ? '••••••••' + authToken.slice(-4) : '(not set)';
@@ -217,9 +223,9 @@ function buildAppHomeView({ statusText = null } = {}) {
 
 // ─── Modal builders ───────────────────────────────────────────────────────────
 
-function buildCredentialsModal() {
-  const accountSid = getSetting('twilio.accountSid') || '';
-  const authToken = getSetting('twilio.authToken') || '';
+async function buildCredentialsModal() {
+  const accountSid = (await getSetting('twilio.accountSid')) || '';
+  const authToken = (await getSetting('twilio.authToken')) || '';
 
   return {
     type: 'modal',
@@ -259,8 +265,8 @@ function buildCredentialsModal() {
   };
 }
 
-function buildDefaultChannelModal() {
-  const defaultChannel = getSetting('slack.defaultChannel') || '';
+async function buildDefaultChannelModal() {
+  const defaultChannel = (await getSetting('slack.defaultChannel')) || '';
 
   return {
     type: 'modal',
@@ -380,25 +386,13 @@ function buildNumberModal(phone = '', entry = null) {
           ...(language ? { initial_option: LANGUAGE_OPTIONS.find((o) => o.value === language) } : {}),
         },
       },
-      // Only show "Connect" checkbox when adding a new line (not editing)
-      ...(!isEdit ? [{
-        type: 'input',
-        block_id: 'block_connect',
-        optional: true,
-        label: { type: 'plain_text', text: 'WalkieTalkie' },
-        hint: { type: 'plain_text', text: 'Marca para apuntar los webhooks de Twilio a este servidor ahora.' },
-        element: {
-          type: 'checkboxes',
-          action_id: 'input_connect',
-          options: [
-            {
-              text: { type: 'mrkdwn', text: '*Conectar a WalkieTalkie*' },
-              description: { type: 'plain_text', text: 'Apunta los webhooks de Twilio a este servidor' },
-              value: 'connect',
-            },
-          ],
-        },
-      }] : []),
+      {
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: '🔗 Al guardar, los webhooks de Twilio se conectan automáticamente a WalkieTalkie (excepto líneas con routing externo como VAPI).',
+        }],
+      },
     ],
   };
 }
