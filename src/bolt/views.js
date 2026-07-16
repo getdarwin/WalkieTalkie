@@ -32,8 +32,9 @@ async function buildAppHomeView({ statusText = null } = {}) {
   const { numbers } = config;
   const numberCount = Object.keys(numbers).length;
 
-  const maskedToken = authToken ? '••••••••' + authToken.slice(-4) : '(not set)';
-  const maskedSid = accountSid ? accountSid.slice(0, 8) + '••••••••' : '(not set)';
+  const credentialsStatus = accountSid && authToken
+    ? '✅ Configured'
+    : '⚠️ Not configured';
 
   const lastSynced = caps.lastSyncedAt
     ? `Last synced: ${new Date(caps.lastSyncedAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}`
@@ -74,7 +75,7 @@ async function buildAppHomeView({ statusText = null } = {}) {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Twilio Credentials*\nAccount SID: \`${maskedSid}\`\nAuth Token: \`${maskedToken}\``,
+        text: `*Twilio Credentials*\n${credentialsStatus}`,
       },
       accessory: {
         type: 'button',
@@ -224,8 +225,7 @@ async function buildAppHomeView({ statusText = null } = {}) {
 // ─── Modal builders ───────────────────────────────────────────────────────────
 
 async function buildCredentialsModal() {
-  const accountSid = (await getSetting('twilio.accountSid')) || '';
-  const authToken = (await getSetting('twilio.authToken')) || '';
+  const hasCredentials = !!(await getSetting('twilio.accountSid')) && !!(await getSetting('twilio.authToken'));
 
   return {
     type: 'modal',
@@ -236,28 +236,33 @@ async function buildCredentialsModal() {
     blocks: [
       {
         type: 'section',
-        text: { type: 'mrkdwn', text: 'Find these at *console.twilio.com → Account Info*.' },
+        text: {
+          type: 'mrkdwn',
+          text: hasCredentials
+            ? 'Credentials are already configured. For security they are never displayed. Fill in a field only to replace it — leave blank to keep the current value.'
+            : 'Find these at *console.twilio.com → Account Info*.',
+        },
       },
       {
         type: 'input',
         block_id: 'block_account_sid',
+        optional: true,
         label: { type: 'plain_text', text: 'Account SID' },
         element: {
           type: 'plain_text_input',
           action_id: 'input_account_sid',
-          initial_value: accountSid,
           placeholder: { type: 'plain_text', text: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' },
         },
       },
       {
         type: 'input',
         block_id: 'block_auth_token',
+        optional: true,
         label: { type: 'plain_text', text: 'Auth Token' },
         hint: { type: 'plain_text', text: 'Stored locally on the server, never sent to Slack.' },
         element: {
           type: 'plain_text_input',
           action_id: 'input_auth_token',
-          initial_value: authToken,
           placeholder: { type: 'plain_text', text: 'Your Twilio Auth Token' },
         },
       },
