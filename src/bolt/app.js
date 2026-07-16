@@ -46,6 +46,32 @@ async function publishAppHome(client, userId, options = {}) {
   }
 }
 
+// ─── Admin allowlist ──────────────────────────────────────────────────────────
+// SLACK_ADMIN_USER_IDS: comma-separated Slack user IDs allowed to make changes
+// (credentials, default channel, numbers, CSV upload, sync). If unset, every
+// workspace member can make changes (previous behavior).
+const ADMIN_USER_IDS = (process.env.SLACK_ADMIN_USER_IDS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function isAdminUser(userId) {
+  return ADMIN_USER_IDS.length === 0 || ADMIN_USER_IDS.includes(userId);
+}
+
+/**
+ * Guard for mutating handlers. When the user is not an allowed admin, refreshes
+ * their App Home with a notice and returns true (caller should return early).
+ */
+async function denyIfNotAdmin(client, body) {
+  const userId = body?.user?.id;
+  if (isAdminUser(userId)) return false;
+  await publishAppHome(client, userId, {
+    statusText: ':lock: Solo los administradores configurados pueden hacer cambios. Pide acceso al equipo de Ops.',
+  });
+  return true;
+}
+
 // Parsed CSV data between the upload modal and the confirm modal.
 // Stored externally (Redis) because serverless instances share no memory.
 const CSV_PENDING_TTL_SECONDS = 15 * 60;
@@ -120,6 +146,7 @@ boltApp.event('app_home_opened', async ({ event, client }) => {
 
 boltApp.action('action_edit_credentials', async ({ ack, client, body }) => {
   await ack();
+  if (await denyIfNotAdmin(client, body)) return;
   try {
     await client.views.open({ trigger_id: body.trigger_id, view: await buildCredentialsModal() });
   } catch (err) {
@@ -129,6 +156,7 @@ boltApp.action('action_edit_credentials', async ({ ack, client, body }) => {
 
 boltApp.action('action_edit_default_channel', async ({ ack, client, body }) => {
   await ack();
+  if (await denyIfNotAdmin(client, body)) return;
   try {
     await client.views.open({ trigger_id: body.trigger_id, view: await buildDefaultChannelModal() });
   } catch (err) {
@@ -138,6 +166,7 @@ boltApp.action('action_edit_default_channel', async ({ ack, client, body }) => {
 
 boltApp.action('action_sync_twilio', async ({ ack, client, body }) => {
   await ack();
+  if (await denyIfNotAdmin(client, body)) return;
   await publishAppHome(client, body.user.id, {
     statusText: ':arrows_counterclockwise: Sincronizando números de Twilio...',
   });
@@ -154,6 +183,7 @@ boltApp.action('action_sync_twilio', async ({ ack, client, body }) => {
 
 boltApp.action('action_add_number', async ({ ack, client, body }) => {
   await ack();
+  if (await denyIfNotAdmin(client, body)) return;
   try {
     await client.views.open({ trigger_id: body.trigger_id, view: buildNumberModal() });
   } catch (err) {
@@ -163,6 +193,7 @@ boltApp.action('action_add_number', async ({ ack, client, body }) => {
 
 boltApp.action('action_upload_csv', async ({ ack, client, body }) => {
   await ack();
+  if (await denyIfNotAdmin(client, body)) return;
   try {
     await client.views.open({ trigger_id: body.trigger_id, view: buildCsvUploadModal() });
   } catch (err) {
@@ -175,6 +206,7 @@ boltApp.action('action_download_csv', async ({ ack }) => { await ack(); });
 
 boltApp.action('action_connect_line', async ({ ack, client, body }) => {
   await ack();
+  if (await denyIfNotAdmin(client, body)) return;
   try {
     await client.views.open({ trigger_id: body.trigger_id, view: buildConnectModal() });
   } catch (err) {
@@ -184,6 +216,7 @@ boltApp.action('action_connect_line', async ({ ack, client, body }) => {
 
 boltApp.action('action_find_edit_line', async ({ ack, client, body }) => {
   await ack();
+  if (await denyIfNotAdmin(client, body)) return;
   try {
     await client.views.open({ trigger_id: body.trigger_id, view: buildFindLineModal() });
   } catch (err) {
@@ -206,6 +239,7 @@ const EXTERNAL_ROUTING_PROVIDERS = new Set(['vapi', 'talkyto', 'pipecat']);
 // Overflow menu for edit/remove on each number row
 boltApp.action(/^action_number_menu__/, async ({ ack, client, body, action }) => {
   await ack();
+  if (await denyIfNotAdmin(client, body)) return;
   const selected = action.selected_option.value;
   const [op, phone] = selected.split(/__(.+)/);
 
@@ -287,6 +321,7 @@ boltApp.action(/^action_number_menu__/, async ({ ack, client, body, action }) =>
 
 boltApp.view('modal_credentials', async ({ ack, view, client, body }) => {
   await ack();
+  if (await denyIfNotAdmin(client, body)) return;
   const values = view.state.values;
   const accountSid = values.block_account_sid.input_account_sid.value?.trim();
   const authToken = values.block_auth_token.input_auth_token.value?.trim();
@@ -299,6 +334,7 @@ boltApp.view('modal_credentials', async ({ ack, view, client, body }) => {
 
 boltApp.view('modal_default_channel', async ({ ack, view, client, body }) => {
   await ack();
+  if (await denyIfNotAdmin(client, body)) return;
   const channel = view.state.values.block_default_channel.input_default_channel.selected_channel;
   if (channel) await setSetting('slack.defaultChannel', channel);
   await publishAppHome(client, body.user.id, { statusText: ':white_check_mark: Canal default actualizado.' });

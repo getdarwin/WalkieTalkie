@@ -107,10 +107,16 @@ router.post('/', twilioValidate, async (req, res) => {
     console.error('[voice] Failed to post call start to Slack:', err.message);
   }
 
-  // Auto-press DTMF if configured for this number (e.g. "1" for WhatsApp verification codes)
+  // Auto-press DTMF if configured for this number (e.g. "1" for WhatsApp verification codes).
+  // Only digits/w/#/* are allowed — anything else would be TwiML injection, since
+  // this value is user-configurable via the App Home / CSV upload.
   const dtmf = await getDtmf(To);
-  const dtmfTwiml = dtmf
-    ? `<Pause length="3"/><Play digits="${dtmf}"/><Pause length="1"/>`
+  const safeDtmf = dtmf && /^[0-9w#*]+$/i.test(dtmf) ? dtmf : null;
+  if (dtmf && !safeDtmf) {
+    console.warn(`[voice] Ignoring invalid dtmf value for ${To}`);
+  }
+  const dtmfTwiml = safeDtmf
+    ? `<Pause length="3"/><Play digits="${safeDtmf}"/><Pause length="1"/>`
     : '';
 
   const baseUrl = process.env.WEBHOOK_BASE_URL;

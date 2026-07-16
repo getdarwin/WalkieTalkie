@@ -56,6 +56,16 @@ app.get('/capabilities', adminAuth, async (req, res) => {
 // Columns: phone_number, friendly_name, channel_id, routing, sms, voice
 //   routing: "walkietalkie" or "vapi" (detected from Twilio voiceUrl/smsUrl in capabilities cache)
 //   sms/voice: yes/no from capabilities cache (blank if not yet scanned)
+// Escapes a CSV field: neutralizes spreadsheet formula injection (=, +, -, @)
+// and quotes fields containing commas, quotes, or newlines.
+function csvField(value) {
+  const str = String(value ?? '');
+  const neutralized = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+  return /[",\n]/.test(neutralized)
+    ? `"${neutralized.replace(/"/g, '""')}"`
+    : neutralized;
+}
+
 app.get('/numbers.csv', adminAuth, async (req, res) => {
   const { numbers } = await loadConfig();
   const caps = (await getCapabilities()).numbers;
@@ -74,8 +84,7 @@ app.get('/numbers.csv', adminAuth, async (req, res) => {
       ? entry.routing
       : (cap ? 'walkietalkie' : 'unknown');
 
-    const safeName = name.includes(',') ? `"${name}"` : name;
-    rows.push(`${phone},${safeName},${channel},${routing},${sms},${voice}`);
+    rows.push([phone, name, channel, routing, sms, voice].map(csvField).join(','));
   }
 
   res.setHeader('Content-Type', 'text/csv');
@@ -89,7 +98,9 @@ app.get('/cron/sync-capabilities', async (req, res) => {
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret) {
     const header = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (header !== cronSecret) {
+    const a = Buffer.from(header);
+    const b = Buffer.from(cronSecret);
+    if (a.length !== b.length || !require('crypto').timingSafeEqual(a, b)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
