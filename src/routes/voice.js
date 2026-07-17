@@ -140,21 +140,45 @@ router.post('/', twilioValidate, async (req, res) => {
     : '';
 
   const baseUrl = process.env.WEBHOOK_BASE_URL;
-  // Process the recording via `recordingStatusCallback`, NOT `action`.
-  // The `action` callback fires the instant recording stops — before Twilio
-  // guarantees the MP3 is downloadable — so an immediate download often 404s,
-  // throws, and leaves the Slack thread stuck on "Recording in progress...".
-  // `recordingStatusCallback` only fires once the recording file is available.
+  // Two callbacks, two jobs:
+  //   • recordingStatusCallback → the real work (download/upload/transcribe).
+  //     Only fires once a recording actually exists AND its MP3 is downloadable,
+  //     which is why we don't download from `action` (that 404s — the file
+  //     isn't ready yet — and leaves the thread stuck on "Recording in progress").
+  //   • action → fires whenever <Record> ends, INCLUDING an immediate hangup
+  //     that produced no recording (so recordingStatusCallback never fires).
+  //     We use it only to resolve the thread when there's no audio.
   twimlResponse(res, `
     ${dtmfTwiml}
     <Record
       maxLength="300"
       timeout="10"
+      action="${baseUrl}/twilio-voice/ended"
       recordingStatusCallback="${baseUrl}/twilio-voice/recording"
-      recordingStatusCallbackEvent="completed absent"
+      recordingStatusCallbackEvent="completed"
       playBeep="false"
     />
   `);
+});
+
+// ─── POST /twilio-voice/ended ─────────────────────────────────────────────────
+// `action` callback: fires when <Record> ends by any means (hangup, silence
+// timeout, maxLength). If audio was captured, recordingStatusCallback owns the
+// processing and we do nothing here. If there's no recording (caller hung up
+// with no audio), we resolve the thread so it never stays "Recording in progress".
+
+router.post('/ended', twilioValidate, async (req, res) => {
+  const { CallSid, RecordingUrl, RecordingDuration, Digits } = req.body;
+  const duration = parseInt(RecordingDuration) || 0;
+
+  console.log(`[voice] Record ended  CallSid=${CallSid}  Digits=${Digits || 'n/a'}  Duration=${duration}s  hasRecording=${!!RecordingUrl}`);
+
+  // Empty TwiML ends the call (if the caller is still on the line).
+  twimlResponse(res);
+
+  if (!RecordingUrl || duration === 0) {
+    backgroundTask(handleNoRecording(CallSid, 'no-audio'));
+  }
 });
 
 // ─── POST /twilio-voice/recording ─────────────────────────────────────────────
@@ -168,10 +192,10 @@ router.post('/recording', twilioValidate, async (req, res) => {
   // background (kept alive on Vercel via waitUntil).
   twimlResponse(res);
 
-  // "absent" (caller hung up before speaking) has no RecordingUrl — resolve the
-  // thread with a note instead of leaving it stuck on "Recording in progress...".
-  if (!RecordingUrl || (RecordingStatus && RecordingStatus !== 'completed')) {
-    backgroundTask(handleNoRecording(CallSid, RecordingStatus || 'absent'));
+  // No RecordingUrl → nothing to process. The `action`/ended callback owns the
+  // "no audio" notice, so just skip here to avoid a duplicate thread message.
+  if (!RecordingUrl) {
+    console.warn(`[voice] Recording callback with no RecordingUrl  CallSid=${CallSid}`);
     return;
   }
 
