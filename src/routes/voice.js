@@ -19,6 +19,8 @@ function twimlResponse(res, xml = '') {
   res.type('text/xml').send(`<Response>${xml}</Response>`);
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Downloads the Twilio recording as an MP3 buffer.
  * Twilio requires Basic Auth (Account SID + Auth Token).
@@ -31,17 +33,35 @@ async function downloadRecording(recordingUrl) {
   ]);
   const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
 
-  const response = await fetch(url, {
-    headers: { Authorization: `Basic ${auth}` },
-    signal: AbortSignal.timeout(30_000),
-  });
+  // Even after recordingStatusCallback fires, the MP3 can briefly lag behind in
+  // Twilio's storage — retry on "not yet available" responses (404/403) with a
+  // short backoff so a transient gap never leaves the thread stuck.
+  const MAX_ATTEMPTS = 4;
+  let lastError;
 
-  if (!response.ok) {
-    throw new Error(`Failed to download recording: ${response.status} ${response.statusText}`);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: { Authorization: `Basic ${auth}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (response.ok) {
+        const arrayBuffer = await response.arrayBuffer();
+        return { buffer: Buffer.from(arrayBuffer), url };
+      }
+
+      lastError = new Error(`Failed to download recording: ${response.status} ${response.statusText}`);
+      // Only 404/403 are worth retrying (file not propagated yet); fail fast otherwise.
+      if (response.status !== 404 && response.status !== 403) break;
+    } catch (err) {
+      lastError = err;
+    }
+
+    if (attempt < MAX_ATTEMPTS) await sleep(attempt * 1000);
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-  return { buffer: Buffer.from(arrayBuffer), url };
+  throw lastError;
 }
 
 /**
@@ -120,12 +140,18 @@ router.post('/', twilioValidate, async (req, res) => {
     : '';
 
   const baseUrl = process.env.WEBHOOK_BASE_URL;
+  // Process the recording via `recordingStatusCallback`, NOT `action`.
+  // The `action` callback fires the instant recording stops — before Twilio
+  // guarantees the MP3 is downloadable — so an immediate download often 404s,
+  // throws, and leaves the Slack thread stuck on "Recording in progress...".
+  // `recordingStatusCallback` only fires once the recording file is available.
   twimlResponse(res, `
     ${dtmfTwiml}
     <Record
       maxLength="300"
       timeout="10"
-      action="${baseUrl}/twilio-voice/recording"
+      recordingStatusCallback="${baseUrl}/twilio-voice/recording"
+      recordingStatusCallbackEvent="completed absent"
       playBeep="false"
     />
   `);
@@ -134,15 +160,54 @@ router.post('/', twilioValidate, async (req, res) => {
 // ─── POST /twilio-voice/recording ─────────────────────────────────────────────
 
 router.post('/recording', twilioValidate, async (req, res) => {
-  const { CallSid, RecordingUrl, RecordingDuration } = req.body;
+  const { CallSid, RecordingUrl, RecordingDuration, RecordingStatus } = req.body;
 
-  console.log(`[voice] Recording ready  CallSid=${CallSid}  Duration=${RecordingDuration}s`);
+  console.log(`[voice] Recording callback  CallSid=${CallSid}  Status=${RecordingStatus || 'n/a'}  Duration=${RecordingDuration}s`);
 
   // Respond to Twilio immediately — download + upload continues in the
   // background (kept alive on Vercel via waitUntil).
   twimlResponse(res);
+
+  // "absent" (caller hung up before speaking) has no RecordingUrl — resolve the
+  // thread with a note instead of leaving it stuck on "Recording in progress...".
+  if (!RecordingUrl || (RecordingStatus && RecordingStatus !== 'completed')) {
+    backgroundTask(handleNoRecording(CallSid, RecordingStatus || 'absent'));
+    return;
+  }
+
   backgroundTask(processRecording(CallSid, RecordingUrl, RecordingDuration));
 });
+
+/**
+ * Posts a short notice to the call thread when Twilio reports no recording
+ * (e.g. the caller hung up before any audio was captured).
+ */
+async function handleNoRecording(CallSid, status) {
+  const thread = await getCallThread(CallSid);
+  if (!thread) {
+    console.warn(`[voice] No thread found for CallSid=${CallSid} (status=${status})`);
+    return;
+  }
+
+  await postToThread(
+    thread.channel,
+    thread.threadTs,
+    [{ type: 'context', elements: [{ type: 'mrkdwn', text: '_⚠️ No audio was recorded for this call._' }] }],
+    '⚠️ No audio was recorded for this call.'
+  );
+
+  await logTransaction({
+    type: 'voice-recording',
+    to: thread.toNumber,
+    from: thread.fromNumber,
+    callSid: CallSid,
+    friendlyName: thread.friendlyName,
+    channel: thread.channel,
+    otp: null,
+    status: 'no-recording',
+    error: `RecordingStatus=${status}`,
+  });
+}
 
 async function processRecording(CallSid, RecordingUrl, RecordingDuration) {
   const thread = await getCallThread(CallSid);
