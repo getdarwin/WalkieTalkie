@@ -140,6 +140,16 @@ router.post('/', twilioValidate, async (req, res) => {
     : '';
 
   const baseUrl = process.env.WEBHOOK_BASE_URL;
+  // Two attributes keep the OTP audio intact (Meta reads codes with tiny pauses
+  // between digits, and the recording kept losing the last/first digit):
+  //   • trim="do-not-trim"  → Twilio's default (trim-silence) strips leading &
+  //     trailing silence, which can clip a digit sitting next to a pause. Off.
+  //   • finishOnKey=""      → default is 1234567890*# — ANY DTMF tone during the
+  //     recording ends it. Empty means no tone can cut the code short. Safe with
+  //     the auto-press below because <Play digits> runs BEFORE <Record>, not during.
+  // The dtmf auto-press (wait time via "w" = 0.5s each, plus the key) stays fully
+  // configurable per line in case Meta reintroduces the human-verification button.
+  //
   // Two callbacks, two jobs:
   //   • recordingStatusCallback → the real work (download/upload/transcribe).
   //     Only fires once a recording actually exists AND its MP3 is downloadable,
@@ -153,6 +163,8 @@ router.post('/', twilioValidate, async (req, res) => {
     <Record
       maxLength="300"
       timeout="10"
+      trim="do-not-trim"
+      finishOnKey=""
       action="${baseUrl}/twilio-voice/ended"
       recordingStatusCallback="${baseUrl}/twilio-voice/recording"
       recordingStatusCallbackEvent="completed"
