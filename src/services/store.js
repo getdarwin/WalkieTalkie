@@ -88,6 +88,23 @@ async function setJSON(key, value, ttlSeconds = null) {
   await redisCmd(...args);
 }
 
+/**
+ * Writes a JSON value only if the key does not exist yet (atomic SET NX).
+ * Returns true when this call created the key — used as a one-shot lock so
+ * concurrent webhook invocations act exactly once per call.
+ */
+async function setJSONIfAbsent(key, value, ttlSeconds = null) {
+  if (!usingRedis) {
+    if (fileRead(key) !== null) return false;
+    fileWrite(key, value, ttlSeconds);
+    return true;
+  }
+  const args = ['SET', key, JSON.stringify(value), 'NX'];
+  if (ttlSeconds) args.push('EX', String(ttlSeconds));
+  const result = await redisCmd(...args);
+  return result === 'OK';
+}
+
 /** Deletes a key. */
 async function del(key) {
   if (!usingRedis) return fileDelete(key);
@@ -98,15 +115,15 @@ async function del(key) {
  * Prepends an entry to a capped list (newest first).
  * Used by the transaction log.
  */
-async function listPush(key, entry, maxEntries) {
+async function listPush(key, entry, maxEntries, ttlSeconds = null) {
   if (!usingRedis) {
     const list = fileRead(key) || [];
-    list.unshift(entry);
-    fileWrite(key, list.slice(0, maxEntries));
+    fileWrite(key, [entry, ...list].slice(0, maxEntries), ttlSeconds);
     return;
   }
   await redisCmd('LPUSH', key, JSON.stringify(entry));
   await redisCmd('LTRIM', key, '0', String(maxEntries - 1));
+  if (ttlSeconds) await redisCmd('EXPIRE', key, String(ttlSeconds));
 }
 
 /** Returns list entries (newest first). */
@@ -120,4 +137,4 @@ async function listRange(key, start = 0, stop = -1) {
   return (raw || []).map((item) => JSON.parse(item));
 }
 
-module.exports = { getJSON, setJSON, del, listPush, listRange, usingRedis };
+module.exports = { getJSON, setJSON, setJSONIfAbsent, del, listPush, listRange, usingRedis };

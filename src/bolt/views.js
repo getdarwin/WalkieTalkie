@@ -366,9 +366,9 @@ function buildNumberModal(phone = '', entry = null) {
       {
         type: 'input',
         block_id: 'block_dtmf',
-        label: { type: 'plain_text', text: 'Auto-press DTMF (optional)' },
+        label: { type: 'plain_text', text: 'Auto-press DTMF (deprecated, ignored)' },
         optional: true,
-        hint: { type: 'plain_text', text: 'Digits pressed automatically when a call arrives. Use "1" for WhatsApp (press 1 to receive code). "w" = 0.5s pause — e.g. "ww1" waits 1s extra before pressing. Meta verification needs no DTMF — it reads the code aloud and transcription handles it.' },
+        hint: { type: 'plain_text', text: 'Deprecated — no longer used on calls. WalkieTalkie now listens to the IVR live and presses whatever key it asks for (the digit changes on every Meta verification call). Kept only for reference.' },
         element: {
           type: 'plain_text_input',
           action_id: 'input_dtmf',

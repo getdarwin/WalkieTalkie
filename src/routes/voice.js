@@ -1,14 +1,17 @@
 const express = require('express');
 const { WebClient } = require('@slack/web-api');
 const Groq = require('groq-sdk');
+const twilio = require('twilio');
 const twilioValidate = require('../middleware/twilioValidate');
 const { getSetting } = require('../services/settings');
-const { getFriendlyName, getChannel, getDtmf, getLanguage } = require('../services/numbers');
+const { getFriendlyName, getChannel, getLanguage } = require('../services/numbers');
 const { checkAndCacheCapabilities } = require('../services/capabilities');
-const { saveCallThread, getCallThread } = require('../services/callThreads');
+const { saveCallThread, getCallThread, updateCallThread } = require('../services/callThreads');
 const { logTransaction } = require('../services/logger');
 const { sendCallStartToSlack, postToThread, parseOtp, buildCallTranscriptBlocks } = require('../services/slack');
 const { backgroundTask } = require('../services/background');
+const { detectKeypress } = require('../services/ivrKeypress');
+const store = require('../services/store');
 
 const router = express.Router();
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
@@ -20,6 +23,84 @@ function twimlResponse(res, xml = '') {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Live IVR transcript segments are kept per call for evidence (surfaced in the
+// transaction log) and the keypress lock guarantees exactly one <Play digits>.
+const IVR_LOG_MAX_SEGMENTS = 100;
+const IVR_LOG_TTL_SECONDS = 24 * 60 * 60;
+const KEYPRESS_LOCK_TTL_SECONDS = 60 * 60;
+
+const ivrLogKey = (callSid) => `ivrlog:${callSid}`;
+const keypressLockKey = (callSid) => `ivrpress:${callSid}`;
+
+/**
+ * <Record> TwiML shared by the initial answer and the post-keypress redirect.
+ *
+ * Two attributes keep the OTP audio intact (Meta reads codes with tiny pauses
+ * between digits, and the recording kept losing the last/first digit):
+ *   • trim="do-not-trim"  → Twilio's default (trim-silence) strips leading &
+ *     trailing silence, which can clip a digit sitting next to a pause. Off.
+ *   • finishOnKey=""      → default is 1234567890*# — ANY DTMF tone during the
+ *     recording ends it. Empty means no tone can cut the code short.
+ *
+ * Two callbacks, two jobs:
+ *   • recordingStatusCallback → the real work (download/upload/transcribe).
+ *     Only fires once a recording actually exists AND its MP3 is downloadable,
+ *     which is why we don't download from `action` (that 404s — the file
+ *     isn't ready yet — and leaves the thread stuck on "Recording in progress").
+ *   • action → fires whenever <Record> ends, INCLUDING an immediate hangup
+ *     that produced no recording (so recordingStatusCallback never fires).
+ *     We use it only to resolve the thread when there's no audio.
+ */
+function recordTwiml(baseUrl) {
+  return `<Record
+      maxLength="300"
+      timeout="10"
+      trim="do-not-trim"
+      finishOnKey=""
+      action="${baseUrl}/twilio-voice/ended"
+      recordingStatusCallback="${baseUrl}/twilio-voice/recording"
+      recordingStatusCallbackEvent="completed"
+      playBeep="false"
+    />`;
+}
+
+/**
+ * <Start><Transcription> TwiML — Twilio Real-Time Transcription of the caller
+ * (inbound) track, streamed to /twilio-voice/transcription while <Record> runs.
+ *
+ * Deepgram nova-3 with languageCode="multi" auto-detects the spoken language,
+ * which matters because Meta's IVR language does not correlate with the line's
+ * country (US lines speak Spanish, AR lines speak English…).
+ */
+function liveTranscriptionTwiml(baseUrl, callSid) {
+  return `<Start>
+      <Transcription
+        name="ivr-${callSid}"
+        statusCallbackUrl="${baseUrl}/twilio-voice/transcription"
+        transcriptionEngine="deepgram"
+        speechModel="nova-3"
+        languageCode="multi"
+        track="inbound_track"
+        partialResults="true"
+      />
+    </Start>`;
+}
+
+/**
+ * Redirects the live call to new TwiML: press the requested key, then keep
+ * recording so the verification code that follows is captured.
+ */
+async function pressKeyOnLiveCall(callSid, digit, baseUrl) {
+  const [accountSid, authToken] = await Promise.all([
+    getSetting('twilio.accountSid'),
+    getSetting('twilio.authToken'),
+  ]);
+  const client = twilio(accountSid, authToken);
+  // "w" = 0.5s pause so the tone lands after the IVR finishes speaking.
+  const twiml = `<Response><Play digits="w${digit}"/>${recordTwiml(baseUrl)}</Response>`;
+  await client.calls(callSid).update({ twiml });
+}
 
 /**
  * Downloads the Twilio recording as an MP3 buffer.
@@ -127,51 +208,111 @@ router.post('/', twilioValidate, async (req, res) => {
     console.error('[voice] Failed to post call start to Slack:', err.message);
   }
 
-  // Auto-press DTMF if configured for this number (e.g. "1" for WhatsApp verification codes).
-  // Only digits/w/#/* are allowed — anything else would be TwiML injection, since
-  // this value is user-configurable via the App Home / CSV upload.
-  const dtmf = await getDtmf(To);
-  const safeDtmf = dtmf && /^[0-9w#*]+$/i.test(dtmf) ? dtmf : null;
-  if (dtmf && !safeDtmf) {
-    console.warn(`[voice] Ignoring invalid dtmf value for ${To}`);
-  }
-  const dtmfTwiml = safeDtmf
-    ? `<Pause length="3"/><Play digits="${safeDtmf}"/><Pause length="1"/>`
-    : '';
-
+  // Record from second zero AND transcribe the caller live. Meta's verification
+  // IVR gates the call behind an anti-bot keypress whose digit changes between
+  // calls ("press 9", "presione el 0", "aperte 8"), so a fixed per-line DTMF
+  // never worked. The /transcription callback below reads the instruction from
+  // the live transcript and presses the key on the running call.
   const baseUrl = process.env.WEBHOOK_BASE_URL;
-  // Two attributes keep the OTP audio intact (Meta reads codes with tiny pauses
-  // between digits, and the recording kept losing the last/first digit):
-  //   • trim="do-not-trim"  → Twilio's default (trim-silence) strips leading &
-  //     trailing silence, which can clip a digit sitting next to a pause. Off.
-  //   • finishOnKey=""      → default is 1234567890*# — ANY DTMF tone during the
-  //     recording ends it. Empty means no tone can cut the code short. Safe with
-  //     the auto-press below because <Play digits> runs BEFORE <Record>, not during.
-  // The dtmf auto-press (wait time via "w" = 0.5s each, plus the key) stays fully
-  // configurable per line in case Meta reintroduces the human-verification button.
-  //
-  // Two callbacks, two jobs:
-  //   • recordingStatusCallback → the real work (download/upload/transcribe).
-  //     Only fires once a recording actually exists AND its MP3 is downloadable,
-  //     which is why we don't download from `action` (that 404s — the file
-  //     isn't ready yet — and leaves the thread stuck on "Recording in progress").
-  //   • action → fires whenever <Record> ends, INCLUDING an immediate hangup
-  //     that produced no recording (so recordingStatusCallback never fires).
-  //     We use it only to resolve the thread when there's no audio.
   twimlResponse(res, `
-    ${dtmfTwiml}
-    <Record
-      maxLength="300"
-      timeout="10"
-      trim="do-not-trim"
-      finishOnKey=""
-      action="${baseUrl}/twilio-voice/ended"
-      recordingStatusCallback="${baseUrl}/twilio-voice/recording"
-      recordingStatusCallbackEvent="completed"
-      playBeep="false"
-    />
+    ${liveTranscriptionTwiml(baseUrl, CallSid)}
+    ${recordTwiml(baseUrl)}
   `);
 });
+
+// ─── POST /twilio-voice/transcription ─────────────────────────────────────────
+// Real-Time Transcription statusCallback. Fires many times per call:
+// transcription-started, N × transcription-content, transcription-stopped.
+// Each content event carries a transcript fragment; when one contains a
+// "press <key>" instruction we redirect the call to <Play digits> exactly once.
+
+router.post('/transcription', twilioValidate, async (req, res) => {
+  const { CallSid, TranscriptionEvent, TranscriptionData, Final, TranscriptionError } = req.body;
+
+  // Twilio ignores the body; acknowledge fast and do the work in the background.
+  res.status(200).end();
+
+  if (TranscriptionEvent === 'transcription-error') {
+    console.error(`[voice] Live transcription error  CallSid=${CallSid}  ${TranscriptionError || ''}`);
+    return;
+  }
+  if (TranscriptionEvent !== 'transcription-content' || !TranscriptionData) return;
+
+  let transcript = '';
+  try {
+    transcript = (JSON.parse(TranscriptionData).transcript || '').trim();
+  } catch {
+    console.warn(`[voice] Unparseable TranscriptionData  CallSid=${CallSid}`);
+    return;
+  }
+  if (!transcript) return;
+
+  const isFinal = String(Final) === 'true';
+  console.log(`[voice] Live transcript  CallSid=${CallSid}  final=${isFinal}  "${transcript}"`);
+
+  backgroundTask(handleLiveTranscript(CallSid, transcript, isFinal));
+});
+
+async function handleLiveTranscript(callSid, transcript, isFinal) {
+  if (isFinal) {
+    await store
+      .listPush(ivrLogKey(callSid), transcript, IVR_LOG_MAX_SEGMENTS, IVR_LOG_TTL_SECONDS)
+      .catch((err) => console.error('[voice] Failed to store live transcript:', err.message));
+  }
+
+  const keypress = detectKeypress(transcript);
+  if (!keypress) return;
+
+  // One-shot lock: partial + final results repeat the same phrase, and several
+  // callback invocations may run concurrently on Vercel.
+  const acquired = await store.setJSONIfAbsent(
+    keypressLockKey(callSid),
+    { digit: keypress.digit, matched: keypress.matched, at: new Date().toISOString() },
+    KEYPRESS_LOCK_TTL_SECONDS
+  );
+  if (!acquired) return;
+
+  console.log(`[voice] IVR asks for key "${keypress.digit}"  CallSid=${callSid}  ("${keypress.matched}")`);
+
+  const thread = await getCallThread(callSid);
+  try {
+    await pressKeyOnLiveCall(callSid, keypress.digit, process.env.WEBHOOK_BASE_URL);
+  } catch (err) {
+    console.error(`[voice] Failed to press key on live call  CallSid=${callSid}:`, err.message);
+    if (thread) {
+      await postToThread(
+        thread.channel,
+        thread.threadTs,
+        [{ type: 'context', elements: [{ type: 'mrkdwn', text: `_⚠️ IVR asked for key *${keypress.digit}* ("${keypress.matched}") but pressing it failed: ${err.message}_` }] }],
+        `⚠️ IVR asked for key ${keypress.digit} but pressing it failed`
+      );
+    }
+    return;
+  }
+
+  await updateCallThread(callSid, { keypress: keypress.digit, keypressMatched: keypress.matched });
+
+  if (thread) {
+    await postToThread(
+      thread.channel,
+      thread.threadTs,
+      [{ type: 'context', elements: [{ type: 'mrkdwn', text: `_🔢 IVR asked for key *${keypress.digit}* ("${keypress.matched}") — pressed automatically._` }] }],
+      `🔢 Pressed key ${keypress.digit} as requested by the IVR`
+    );
+    await logTransaction({
+      type: 'voice-keypress',
+      to: thread.toNumber,
+      from: thread.fromNumber,
+      callSid,
+      friendlyName: thread.friendlyName,
+      channel: thread.channel,
+      otp: null,
+      keypress: keypress.digit,
+      matched: keypress.matched,
+      status: 'success',
+    });
+  }
+}
 
 // ─── POST /twilio-voice/ended ─────────────────────────────────────────────────
 // `action` callback: fires when <Record> ends by any means (hangup, silence
@@ -192,6 +333,17 @@ router.post('/ended', twilioValidate, async (req, res) => {
     backgroundTask(handleNoRecording(CallSid, 'no-audio'));
   }
 });
+
+/** Live IVR transcript segments for a call, oldest first. */
+async function loadLiveTranscript(callSid) {
+  try {
+    const segments = await store.listRange(ivrLogKey(callSid));
+    return segments.length ? segments.reverse().join(' ') : null;
+  } catch (err) {
+    console.error('[voice] Failed to load live transcript:', err.message);
+    return null;
+  }
+}
 
 // ─── POST /twilio-voice/recording ─────────────────────────────────────────────
 
@@ -225,6 +377,13 @@ async function handleNoRecording(CallSid, status) {
     return;
   }
 
+  // Pressing the IVR key redirects the call and cuts the first <Record> short;
+  // the second <Record> is still running, so this is not a silent call.
+  if (thread.keypress) {
+    console.log(`[voice] Ignoring empty first segment after keypress  CallSid=${CallSid}`);
+    return;
+  }
+
   await postToThread(
     thread.channel,
     thread.threadTs,
@@ -254,6 +413,7 @@ async function processRecording(CallSid, RecordingUrl, RecordingDuration) {
 
   const duration = parseInt(RecordingDuration) || 0;
   const language = await getLanguage(thread.toNumber);
+  const liveTranscript = await loadLiveTranscript(CallSid);
 
   try {
     const { buffer } = await downloadRecording(RecordingUrl);
@@ -288,6 +448,8 @@ async function processRecording(CallSid, RecordingUrl, RecordingDuration) {
       recordingUrl: `${RecordingUrl}.mp3`,
       duration,
       transcript: transcript || null,
+      liveTranscript,
+      keypress: thread.keypress || null,
       otp: transcript ? parseOtp(transcript) : null,
       friendlyName: thread.friendlyName,
       channel: thread.channel,

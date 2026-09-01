@@ -34,4 +34,20 @@ async function getCallThread(callSid) {
   return store.getJSON(keyFor(callSid));
 }
 
-module.exports = { saveCallThread, getCallThread };
+/**
+ * Merges extra fields into an existing call thread record (e.g. the IVR key
+ * that was pressed). No-op if the record does not exist.
+ *
+ * @param {string} callSid
+ * @param {object} patch
+ * @returns {Promise<object|null>} the updated record
+ */
+async function updateCallThread(callSid, patch) {
+  const existing = await getCallThread(callSid);
+  if (!existing) return null;
+  const updated = { ...existing, ...patch };
+  await store.setJSON(keyFor(callSid), updated, TTL_SECONDS);
+  return updated;
+}
+
+module.exports = { saveCallThread, getCallThread, updateCallThread };

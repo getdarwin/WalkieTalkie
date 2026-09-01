@@ -16,16 +16,17 @@ src/
   index.js                      # Entry point, env validation, HTTP routes, CSV export
   routes/
     twilio.js                   # POST /twilio-webhook (SMS handler)
-    voice.js                    # POST /twilio-voice (voice + recording handler)
+    voice.js                    # POST /twilio-voice (voice, live IVR keypress + recording handler)
   middleware/
     twilioValidate.js           # HMAC-SHA1 Twilio signature check (uses req.originalUrl)
-    adminAuth.js                # Optional ADMIN_SECRET check for /logs + /capabilities
+    adminAuth.js                # Optional ADMIN_SECRET check for /logs, /capabilities + /numbers.csv
   bolt/
     app.js                      # Slack Bolt app — App Home, block actions, modals
     views.js                    # Block Kit builders: App Home, all modals
   services/
     numbers.js                  # config/numbers.json CRUD (hot-reload on every request)
     slack.js                    # OTP parsing, Block Kit builder, thread management
+    ivrKeypress.js              # Detects "press <key>" (EN/ES/PT) in live IVR transcripts
     logger.js                   # Appends to data/logs.json (last 1000 entries)
     capabilities.js             # Twilio capability sync, cron scheduler, cache
     settings.js                 # data/settings.json with env var fallbacks
@@ -53,7 +54,7 @@ scripts/
 | `SLACK_SIGNING_SECRET` | Slack app signing secret (Basic Information page) |
 | `SLACK_DEFAULT_CHANNEL` | Slack channel ID for numbers with no override |
 | `GROQ_API_KEY` | Optional — enables Groq Whisper transcription |
-| `ADMIN_SECRET` | Optional — protects /logs and /capabilities with bearer token auth |
+| `ADMIN_SECRET` | Optional — protects /logs, /capabilities and /numbers.csv with bearer token auth |
 | `PORT` | Server port (default: 3000) |
 
 ## HTTP Endpoints
@@ -62,10 +63,12 @@ scripts/
 | `GET` | `/health` | None | Uptime check |
 | `GET` | `/logs?limit=N&type=sms\|voice-recording` | Optional ADMIN_SECRET | Transaction log |
 | `GET` | `/capabilities?type=sms\|voice\|mms\|fax` | Optional ADMIN_SECRET | Twilio capabilities cache |
-| `GET` | `/numbers.csv` | None | Full number directory as CSV |
+| `GET` | `/numbers.csv` | Optional ADMIN_SECRET | Full number directory as CSV |
 | `POST` | `/twilio-webhook` | Twilio HMAC | Inbound SMS from all Twilio numbers |
 | `POST` | `/twilio-voice` | Twilio HMAC | Inbound voice call |
 | `POST` | `/twilio-voice/recording` | Twilio HMAC | Recording callback |
+| `POST` | `/twilio-voice/ended` | Twilio HMAC | `<Record>` action callback (resolves silent calls) |
+| `POST` | `/twilio-voice/transcription` | Twilio HMAC | Real-Time Transcription callback (live IVR keypress) |
 | `POST` | `/slack/events` | Slack signing secret | Bolt events + interactions |
 
 ## Key Behaviors
@@ -82,6 +85,43 @@ scripts/
 - On recording callback: download MP3 from Twilio (30s timeout), upload to Slack, transcribe via Groq
 - Transcription is multilingual (Spanish, Portuguese, English)
 - Call threads keyed by `channel:toNumber:YYYY-MM-DD` — one thread per line per day
+
+### Live IVR keypress (Meta WhatsApp verification)
+Meta's verification IVR gates the call behind an anti-bot keypress and **the digit changes
+on every call** (`0`, `1`, `8`, `9` all seen in production). A fixed per-line DTMF was a
+lottery, so calls are now handled like this:
+
+1. `POST /twilio-voice` answers with `<Start><Transcription>` (Deepgram `nova-3`,
+   `languageCode="multi"` → auto language detection, inbound track only, partial results)
+   followed immediately by `<Record>` — audio is captured from second zero.
+2. Twilio streams transcript fragments to `POST /twilio-voice/transcription`.
+   `detectKeypress()` (`services/ivrKeypress.js`) looks for an instruction verb followed
+   by a key — "press 9", "presione el 0", "aperte a tecla oito", "press pound" — in EN/ES/PT.
+   Spoken codes ("your code is 1 6 9 4 2 9") never match because no verb precedes them.
+3. On the first match, a one-shot Redis lock (`ivrpress:<CallSid>`, SET NX) guarantees a
+   single press, then the live call is redirected via REST (`calls(sid).update({ twiml })`)
+   to `<Play digits="w<key>"/>` + a fresh `<Record>`. The thread gets a
+   "🔢 IVR asked for key N — pressed automatically" note and a `voice-keypress` log entry.
+4. The redirect cuts the first `<Record>` short; its `action` callback is ignored when the
+   call record has `keypress` set, so no false "No audio was recorded" notice is posted.
+   Both recording segments are uploaded and transcribed as usual.
+5. Final live-transcript segments are kept in `ivrlog:<CallSid>` (24h TTL) and attached to
+   the `voice-recording` log entry as `liveTranscript` for debugging.
+
+The per-line `dtmf` field is **deprecated and ignored** on calls (still stored/displayed
+so existing directories don't break). Tests: `npm test` (`tests/ivrKeypress.test.js`).
+
+### ⚠️ Still known-broken
+**`getLanguage()` forces the wrong language into Whisper.** The IVR's language does not
+correlate with the line's country — a US line speaks Spanish, AR lines speak English. A
+forced mismatch yields garbage like `"Seu código de verificación es"`. Let Whisper auto-detect.
+
+`parseOtp()` returns the first `\d{4,8}` it finds, which produces false positives
+(a Brazilian radio ad yielded `2016`; a scam call impersonating a bank yielded `1520`) and
+truncates real codes (`9429` instead of `169429`).
+
+Full evidence, call volumes and the testing plan live in the project memory file
+`meta_ivr_keypress.md`.
 
 ### Slack Threading
 - Threads are keyed by `channel:toNumber:YYYY-MM-DD` — one thread per line per day
@@ -101,6 +141,11 @@ scripts/
 ### Settings Hierarchy
 - `data/settings.json` takes precedence over `.env` for: Twilio credentials + default channel
 - Allows updating credentials from the Slack App Home without restarting the server
+- All credential reads use `getSetting()` — including webhook signature validation (`twilioValidate.js`)
+  and recording downloads (`voice.js`) — so Slack App Home changes take effect immediately
+- **Railway note**: `data/` is ephemeral on Railway (reset on each deploy). For persistent credential
+  updates on Railway, set env vars in the Railway dashboard. A mounted Volume on `/app/data` would
+  make Slack App Home updates persist across deploys.
 
 ### Number Directory CSV
 - `GET /numbers.csv` exports the full directory with columns:
@@ -154,6 +199,7 @@ curl "http://localhost:3000/capabilities?type=sms" | jq '.count'
 
 # Download number directory
 curl "http://localhost:3000/numbers.csv"
+curl "http://localhost:3000/numbers.csv?secret=<ADMIN_SECRET>"  # if ADMIN_SECRET set
 
 # Health check
 curl "http://localhost:3000/health"
