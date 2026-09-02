@@ -1,24 +1,29 @@
 const fs = require('fs');
 const path = require('path');
+const store = require('./store');
 
-const SETTINGS_PATH = path.join(__dirname, '../../data/settings.json');
+const SETTINGS_KEY = 'settings';
+const LEGACY_PATH = path.join(__dirname, '../../data/settings.json');
 
-// ─── File I/O ─────────────────────────────────────────────────────────────────
+/**
+ * Loads settings from the store; on first run seeds from the legacy
+ * data/settings.json file (pre-Redis format) if present.
+ */
+async function loadSettingsWithSeed() {
+  const settings = await store.getJSON(SETTINGS_KEY);
+  if (settings) return settings;
 
-function loadSettings() {
   try {
-    if (!fs.existsSync(SETTINGS_PATH)) return {};
-    return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+    const legacy = JSON.parse(fs.readFileSync(LEGACY_PATH, 'utf8'));
+    if (legacy && Object.keys(legacy).length > 0) {
+      await store.setJSON(SETTINGS_KEY, legacy);
+      console.log('[settings] Seeded settings from legacy data/settings.json');
+      return legacy;
+    }
   } catch {
-    return {};
+    // No legacy file — start empty
   }
-}
-
-function saveSettings(data) {
-  const dir = path.dirname(SETTINGS_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(data, null, 2));
-  try { fs.chmodSync(SETTINGS_PATH, 0o600); } catch {} // restrict to owner only
+  return {};
 }
 
 // ─── Dot-path helpers ─────────────────────────────────────────────────────────
@@ -49,29 +54,34 @@ const ENV_FALLBACKS = {
 
 /**
  * Gets a setting by dot-path. Falls back to the corresponding env var if not
- * set in data/settings.json.
+ * set in the store.
  *
  * @param {string} dotPath  e.g. 'twilio.accountSid'
- * @returns {string|undefined}
+ * @returns {Promise<string|undefined>}
  */
-function getSetting(dotPath) {
-  const settings = loadSettings();
-  const value = getNestedValue(settings, dotPath);
+async function getSetting(dotPath) {
+  let settings = null;
+  try {
+    settings = await loadSettingsWithSeed();
+  } catch (err) {
+    console.error('[settings] Failed to read settings from store:', err.message);
+  }
+  const value = settings ? getNestedValue(settings, dotPath) : undefined;
   if (value !== undefined && value !== '') return value;
   const envKey = ENV_FALLBACKS[dotPath];
   return envKey ? process.env[envKey] : undefined;
 }
 
 /**
- * Sets a setting by dot-path and saves to data/settings.json.
+ * Sets a setting by dot-path and persists it.
  *
  * @param {string} dotPath  e.g. 'twilio.authToken'
  * @param {string} value
  */
-function setSetting(dotPath, value) {
-  const settings = loadSettings();
+async function setSetting(dotPath, value) {
+  const settings = await loadSettingsWithSeed();
   setNestedValue(settings, dotPath, value);
-  saveSettings(settings);
+  await store.setJSON(SETTINGS_KEY, settings);
 }
 
-module.exports = { getSetting, setSetting, loadSettings };
+module.exports = { getSetting, setSetting };

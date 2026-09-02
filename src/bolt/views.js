@@ -1,6 +1,27 @@
 const { getSetting } = require('../services/settings');
-const { loadConfig } = require('../services/numbers');
+const { loadConfig, getGlobalKeypressMode } = require('../services/numbers');
 const { getCapabilities } = require('../services/capabilities');
+const { resolveKeypressMode } = require('../services/ivrKeypress');
+
+// ─── Keypress mode labels ─────────────────────────────────────────────────────
+
+const KEYPRESS_MODE_LABELS = {
+  auto: '🎧 Automático — escucha el IVR y pulsa la tecla que pida',
+  fixed: '🔢 Fijo — pulsa siempre los dígitos configurados',
+  none: '🚫 Ninguno — no pulsa nada',
+};
+
+const KEYPRESS_MODE_OPTIONS = Object.entries(KEYPRESS_MODE_LABELS).map(([value, text]) => ({
+  text: { type: 'plain_text', text, emoji: true },
+  value,
+}));
+
+/** Short badge for the line list: "🎧 Auto", "🔢 Fijo: ww1", "🚫 Sin tecla". */
+function keypressBadge(entry, globalMode) {
+  const { mode, dtmf, source } = resolveKeypressMode(entry, globalMode);
+  const label = mode === 'auto' ? '🎧 Auto' : mode === 'fixed' ? `🔢 Fijo: ${dtmf}` : '🚫 Sin tecla';
+  return source === 'global' ? `${label} _(default)_` : label;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -18,16 +39,24 @@ function relativeTime(isoString) {
  * Builds the full App Home Block Kit view.
  * Called on every home_opened event and after any config change.
  */
-function buildAppHomeView({ statusText = null } = {}) {
-  const accountSid = getSetting('twilio.accountSid') || '';
-  const authToken = getSetting('twilio.authToken') || '';
-  const defaultChannel = getSetting('slack.defaultChannel') || '';
-  const { numbers } = loadConfig();
-  const caps = getCapabilities();
+async function buildAppHomeView({ statusText = null } = {}) {
+  const [accountSidRaw, authTokenRaw, defaultChannelRaw, config, caps, globalKeypressMode] = await Promise.all([
+    getSetting('twilio.accountSid'),
+    getSetting('twilio.authToken'),
+    getSetting('slack.defaultChannel'),
+    loadConfig(),
+    getCapabilities(),
+    getGlobalKeypressMode(),
+  ]);
+  const accountSid = accountSidRaw || '';
+  const authToken = authTokenRaw || '';
+  const defaultChannel = defaultChannelRaw || '';
+  const { numbers } = config;
   const numberCount = Object.keys(numbers).length;
 
-  const maskedToken = authToken ? '••••••••' + authToken.slice(-4) : '(not set)';
-  const maskedSid = accountSid ? accountSid.slice(0, 8) + '••••••••' : '(not set)';
+  const credentialsStatus = accountSid && authToken
+    ? '✅ Configured'
+    : '⚠️ Not configured';
 
   const lastSynced = caps.lastSyncedAt
     ? `Last synced: ${new Date(caps.lastSyncedAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}`
@@ -68,7 +97,7 @@ function buildAppHomeView({ statusText = null } = {}) {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Twilio Credentials*\nAccount SID: \`${maskedSid}\`\nAuth Token: \`${maskedToken}\``,
+        text: `*Twilio Credentials*\n${credentialsStatus}`,
       },
       accessory: {
         type: 'button',
@@ -89,6 +118,21 @@ function buildAppHomeView({ statusText = null } = {}) {
         type: 'button',
         text: { type: 'plain_text', text: '✏️ Edit', emoji: true },
         action_id: 'action_edit_default_channel',
+      },
+    },
+    { type: 'divider' },
+
+    // ─── IVR Keypress (global default) ────────────────────────────────────────
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Tecla del IVR (default para todas las líneas)*\n${KEYPRESS_MODE_LABELS[globalKeypressMode]}\n_Meta cambia el dígito en cada llamada de verificación; en Automático WalkieTalkie lo lee en vivo y lo pulsa. Cada línea puede tener su propio modo desde ✏️ Edit._`,
+      },
+      accessory: {
+        type: 'button',
+        text: { type: 'plain_text', text: '✏️ Edit', emoji: true },
+        action_id: 'action_edit_keypress_mode',
       },
     },
     { type: 'divider' },
@@ -128,7 +172,7 @@ function buildAppHomeView({ statusText = null } = {}) {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `Download the CSV, edit names and channels in any spreadsheet app, then paste the contents back using *Upload CSV*.\n\nCSV columns: \`phone_number\`, \`friendly_name\`, \`channel_id\`, \`routing\` (\`walkietalkie\` or \`vapi\`), \`sms\`, \`voice\``,
+        text: `Download the CSV, edit names and channels in any spreadsheet app, then paste the contents back using *Upload CSV*.\n\nCSV columns: \`phone_number\`, \`friendly_name\`, \`channel_id\`, \`routing\` (\`walkietalkie\` or \`vapi\`), \`sms\`, \`voice\`, \`keypress_mode\` (\`auto\`, \`fixed\`, \`none\` or blank = default), \`dtmf\`, \`language\``,
       },
     },
     {
@@ -143,7 +187,7 @@ function buildAppHomeView({ statusText = null } = {}) {
         ...(baseUrl ? [{
           type: 'button',
           text: { type: 'plain_text', text: '⬇️ Download CSV', emoji: true },
-          url: `${baseUrl}/numbers.csv`,
+          url: `${baseUrl}/numbers.csv${process.env.ADMIN_SECRET ? `?secret=${encodeURIComponent(process.env.ADMIN_SECRET)}` : ''}`,
           action_id: 'action_download_csv',
         }] : []),
         {
@@ -186,12 +230,13 @@ function buildAppHomeView({ statusText = null } = {}) {
       const connBadge = !cap || !baseUrl || isExternal
         ? ''
         : (smsConn || voiceConn) ? '  🟢' : '  🔴';
+      const keyBadge = isExternal ? '' : `  |  ${keypressBadge(entry, globalKeypressMode)}`;
 
       blocks.push({
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*${name || '_(no name)_'}*  \`${phone}\`${routingBadge}\n→ ${channelDisplay}  |  ${capBadges}${connBadge}`,
+          text: `*${name || '_(no name)_'}*  \`${phone}\`${routingBadge}\n→ ${channelDisplay}  |  ${capBadges}${connBadge}${keyBadge}`,
         },
         accessory: {
           type: 'overflow',
@@ -217,9 +262,8 @@ function buildAppHomeView({ statusText = null } = {}) {
 
 // ─── Modal builders ───────────────────────────────────────────────────────────
 
-function buildCredentialsModal() {
-  const accountSid = getSetting('twilio.accountSid') || '';
-  const authToken = getSetting('twilio.authToken') || '';
+async function buildCredentialsModal() {
+  const hasCredentials = !!(await getSetting('twilio.accountSid')) && !!(await getSetting('twilio.authToken'));
 
   return {
     type: 'modal',
@@ -230,28 +274,33 @@ function buildCredentialsModal() {
     blocks: [
       {
         type: 'section',
-        text: { type: 'mrkdwn', text: 'Find these at *console.twilio.com → Account Info*.' },
+        text: {
+          type: 'mrkdwn',
+          text: hasCredentials
+            ? 'Credentials are already configured. For security they are never displayed. Fill in a field only to replace it — leave blank to keep the current value.'
+            : 'Find these at *console.twilio.com → Account Info*.',
+        },
       },
       {
         type: 'input',
         block_id: 'block_account_sid',
+        optional: true,
         label: { type: 'plain_text', text: 'Account SID' },
         element: {
           type: 'plain_text_input',
           action_id: 'input_account_sid',
-          initial_value: accountSid,
           placeholder: { type: 'plain_text', text: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' },
         },
       },
       {
         type: 'input',
         block_id: 'block_auth_token',
+        optional: true,
         label: { type: 'plain_text', text: 'Auth Token' },
         hint: { type: 'plain_text', text: 'Stored locally on the server, never sent to Slack.' },
         element: {
           type: 'plain_text_input',
           action_id: 'input_auth_token',
-          initial_value: authToken,
           placeholder: { type: 'plain_text', text: 'Your Twilio Auth Token' },
         },
       },
@@ -259,8 +308,8 @@ function buildCredentialsModal() {
   };
 }
 
-function buildDefaultChannelModal() {
-  const defaultChannel = getSetting('slack.defaultChannel') || '';
+async function buildDefaultChannelModal() {
+  const defaultChannel = (await getSetting('slack.defaultChannel')) || '';
 
   return {
     type: 'modal',
@@ -299,12 +348,19 @@ const LANGUAGE_OPTIONS = [
   { text: { type: 'plain_text', text: '🇸🇦 Arabic (ar)' }, value: 'ar' },
 ];
 
-function buildNumberModal(phone = '', entry = null) {
+function buildNumberModal(phone = '', entry = null, globalKeypressMode = 'auto') {
   const isEdit = !!phone;
   const name = entry ? (typeof entry === 'string' ? entry : entry.name || '') : '';
   const channel = entry && typeof entry === 'object' ? entry.channel || '' : '';
   const dtmf = entry && typeof entry === 'object' ? entry.dtmf || '' : '';
   const language = entry && typeof entry === 'object' ? entry.language || '' : '';
+  const keypressMode = entry && typeof entry === 'object' ? entry.keypressMode || '' : '';
+
+  const inheritOption = {
+    text: { type: 'plain_text', text: `↩️ Usar default global (${KEYPRESS_MODE_LABELS[globalKeypressMode].split(' — ')[0]})`, emoji: true },
+    value: 'inherit',
+  };
+  const keypressOptions = [inheritOption, ...KEYPRESS_MODE_OPTIONS];
 
   return {
     type: 'modal',
@@ -354,15 +410,28 @@ function buildNumberModal(phone = '', entry = null) {
       },
       {
         type: 'input',
-        block_id: 'block_dtmf',
-        label: { type: 'plain_text', text: 'Auto-press DTMF (optional)' },
+        block_id: 'block_keypress_mode',
+        label: { type: 'plain_text', text: 'Modo de tecla del IVR' },
         optional: true,
-        hint: { type: 'plain_text', text: 'Digits pressed automatically when a call arrives. Use "1" for WhatsApp (press 1 to receive code). "w" = 0.5s pause — e.g. "ww1" waits 1s extra before pressing. Meta verification needs no DTMF — it reads the code aloud and transcription handles it.' },
+        hint: { type: 'plain_text', text: 'Automático (recomendado): escucha la llamada en vivo y pulsa la tecla que pida el IVR — Meta cambia el dígito en cada verificación. Fijo: solo para IVRs con menú estable.' },
+        element: {
+          type: 'static_select',
+          action_id: 'input_keypress_mode',
+          options: keypressOptions,
+          initial_option: keypressOptions.find((o) => o.value === (keypressMode || 'inherit')),
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'block_dtmf',
+        label: { type: 'plain_text', text: 'Dígitos fijos (solo en modo Fijo)' },
+        optional: true,
+        hint: { type: 'plain_text', text: 'Solo se usan si el modo es Fijo. Dígitos 0-9, # y *; "w" = pausa de 0.5s — p. ej. "ww1" espera 1s y pulsa 1.' },
         element: {
           type: 'plain_text_input',
           action_id: 'input_dtmf',
           ...(dtmf ? { initial_value: dtmf } : {}),
-          placeholder: { type: 'plain_text', text: 'e.g. 1' },
+          placeholder: { type: 'plain_text', text: 'e.g. ww1' },
           max_length: 20,
         },
       },
@@ -380,25 +449,45 @@ function buildNumberModal(phone = '', entry = null) {
           ...(language ? { initial_option: LANGUAGE_OPTIONS.find((o) => o.value === language) } : {}),
         },
       },
-      // Only show "Connect" checkbox when adding a new line (not editing)
-      ...(!isEdit ? [{
-        type: 'input',
-        block_id: 'block_connect',
-        optional: true,
-        label: { type: 'plain_text', text: 'WalkieTalkie' },
-        hint: { type: 'plain_text', text: 'Marca para apuntar los webhooks de Twilio a este servidor ahora.' },
-        element: {
-          type: 'checkboxes',
-          action_id: 'input_connect',
-          options: [
-            {
-              text: { type: 'mrkdwn', text: '*Conectar a WalkieTalkie*' },
-              description: { type: 'plain_text', text: 'Apunta los webhooks de Twilio a este servidor' },
-              value: 'connect',
-            },
-          ],
+      {
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: '🔗 Al guardar, los webhooks de Twilio se conectan automáticamente a WalkieTalkie (excepto líneas con routing externo como VAPI).',
+        }],
+      },
+    ],
+  };
+}
+
+/** Global default for the IVR keypress mode. "fixed" makes no sense globally. */
+function buildKeypressModeModal(currentMode = 'auto') {
+  const options = KEYPRESS_MODE_OPTIONS.filter((o) => o.value !== 'fixed');
+  return {
+    type: 'modal',
+    callback_id: 'modal_keypress_mode',
+    title: { type: 'plain_text', text: 'Tecla del IVR' },
+    submit: { type: 'plain_text', text: 'Save' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'Default para todas las líneas sin modo propio. En *Automático*, WalkieTalkie transcribe la llamada en vivo, detecta frases como "presione el 9" y pulsa esa tecla al instante; después sigue grabando el código.',
         },
-      }] : []),
+      },
+      {
+        type: 'input',
+        block_id: 'block_keypress_mode',
+        label: { type: 'plain_text', text: 'Modo default' },
+        element: {
+          type: 'static_select',
+          action_id: 'input_keypress_mode',
+          options,
+          initial_option: options.find((o) => o.value === currentMode) || options[0],
+        },
+      },
     ],
   };
 }
@@ -672,6 +761,7 @@ function buildFindLineModal() {
 }
 
 module.exports = {
+  buildKeypressModeModal,
   buildAppHomeView,
   buildCredentialsModal,
   buildDefaultChannelModal,

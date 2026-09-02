@@ -1,28 +1,24 @@
-const fs = require('fs');
-const path = require('path');
-const cron = require('node-cron');
 const twilio = require('twilio');
+const store = require('./store');
 const { getSetting } = require('./settings');
 const { loadConfig, setNumber } = require('./numbers');
 
-const CAPABILITIES_PATH = path.join(__dirname, '../../data/capabilities.json');
+const CAPABILITIES_KEY = 'capabilities';
 const SYNC_INTERVAL_DAYS = 14;
 
-// ─── File I/O ─────────────────────────────────────────────────────────────────
+// ─── Store I/O ────────────────────────────────────────────────────────────────
 
-function loadCapabilities() {
+async function loadCapabilities() {
   try {
-    if (!fs.existsSync(CAPABILITIES_PATH)) return { lastSyncedAt: null, numbers: {} };
-    return JSON.parse(fs.readFileSync(CAPABILITIES_PATH, 'utf8'));
-  } catch {
+    return (await store.getJSON(CAPABILITIES_KEY)) || { lastSyncedAt: null, numbers: {} };
+  } catch (err) {
+    console.error('[capabilities] Failed to load capabilities:', err.message);
     return { lastSyncedAt: null, numbers: {} };
   }
 }
 
-function saveCapabilities(data) {
-  const dir = path.dirname(CAPABILITIES_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(CAPABILITIES_PATH, JSON.stringify(data, null, 2));
+async function saveCapabilities(data) {
+  await store.setJSON(CAPABILITIES_KEY, data);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -50,8 +46,12 @@ function buildRecord(num) {
   };
 }
 
-function makeClient() {
-  return twilio(getSetting('twilio.accountSid'), getSetting('twilio.authToken'));
+async function makeClient() {
+  const [accountSid, authToken] = await Promise.all([
+    getSetting('twilio.accountSid'),
+    getSetting('twilio.authToken'),
+  ]);
+  return twilio(accountSid, authToken);
 }
 
 // ─── Sync functions ───────────────────────────────────────────────────────────
@@ -61,52 +61,65 @@ function makeClient() {
  * Sets lastSyncedAt on completion.
  * Auto-imports any numbers whose Twilio webhooks already point to this
  * WalkieTalkie instance (WEBHOOK_BASE_URL) if they are not yet in the directory.
+ *
+ * Scheduling: locally this can be called ad-hoc; on Vercel the
+ * /cron/sync-capabilities endpoint (vercel.json crons) triggers it.
  */
 async function syncAllCapabilities() {
   console.log('[capabilities] Starting full sync...');
-  try {
-    const client = makeClient();
-    const numbers = await client.incomingPhoneNumbers.list();
-    const data = loadCapabilities();
-    const baseUrl = process.env.WEBHOOK_BASE_URL;
+  const client = await makeClient();
+  const numbers = await client.incomingPhoneNumbers.list();
+  const data = await loadCapabilities();
+  const baseUrl = process.env.WEBHOOK_BASE_URL;
 
-    // Load current directory once before iterating
-    const { numbers: configNumbers } = loadConfig();
-    let autoImported = 0;
+  // Load current directory once before iterating
+  const { numbers: configNumbers } = await loadConfig();
+  let autoImported = 0;
 
-    for (const num of numbers) {
-      data.numbers[num.phoneNumber] = buildRecord(num);
+  for (const num of numbers) {
+    data.numbers[num.phoneNumber] = buildRecord(num);
 
-      // Auto-import numbers already connected to this WalkieTalkie instance
-      if (baseUrl && !(num.phoneNumber in configNumbers)) {
-        const smsConnected = num.smsUrl && num.smsUrl.startsWith(baseUrl);
-        const voiceConnected = num.voiceUrl && num.voiceUrl.startsWith(baseUrl);
-        if (smsConnected || voiceConnected) {
-          setNumber(num.phoneNumber, { name: num.friendlyName || '' });
-          autoImported++;
-          console.log(`[capabilities] Auto-imported ${num.phoneNumber} (already connected to WalkieTalkie)`);
-        }
+    // Auto-import numbers already connected to this WalkieTalkie instance
+    if (baseUrl && !(num.phoneNumber in configNumbers)) {
+      const smsConnected = num.smsUrl && num.smsUrl.startsWith(baseUrl);
+      const voiceConnected = num.voiceUrl && num.voiceUrl.startsWith(baseUrl);
+      if (smsConnected || voiceConnected) {
+        await setNumber(num.phoneNumber, { name: num.friendlyName || '' });
+        autoImported++;
+        console.log(`[capabilities] Auto-imported ${num.phoneNumber} (already connected to WalkieTalkie)`);
       }
     }
-
-    data.lastSyncedAt = new Date().toISOString();
-    saveCapabilities(data);
-    console.log(`[capabilities] Full sync complete — ${numbers.length} numbers${autoImported ? `, ${autoImported} auto-imported` : ''}`);
-  } catch (err) {
-    console.error('[capabilities] Full sync failed:', err.message);
   }
+
+  data.lastSyncedAt = new Date().toISOString();
+  await saveCapabilities(data);
+  console.log(`[capabilities] Full sync complete — ${numbers.length} numbers${autoImported ? `, ${autoImported} auto-imported` : ''}`);
+  return { count: numbers.length, autoImported };
+}
+
+/**
+ * Runs a full sync only when the store is stale (>14 days) or empty.
+ * Used by the cron endpoint and local startup.
+ */
+async function syncIfStale() {
+  const { lastSyncedAt } = await loadCapabilities();
+  if (!isStale(lastSyncedAt)) {
+    console.log(`[capabilities] Store is fresh (last synced: ${lastSyncedAt})`);
+    return { skipped: true, lastSyncedAt };
+  }
+  return syncAllCapabilities();
 }
 
 /**
  * Fetches capabilities for a single E.164 number from Twilio.
- * Updates data/capabilities.json with the result.
+ * Updates the capabilities store with the result.
  *
  * @param {string} e164
- * @returns {object|null}
+ * @returns {Promise<object|null>}
  */
 async function fetchSingleCapability(e164) {
   try {
-    const client = makeClient();
+    const client = await makeClient();
     const results = await client.incomingPhoneNumbers.list({ phoneNumber: e164 });
 
     if (!results.length) {
@@ -115,9 +128,9 @@ async function fetchSingleCapability(e164) {
     }
 
     const record = buildRecord(results[0]);
-    const data = loadCapabilities();
+    const data = await loadCapabilities();
     data.numbers[e164] = record;
-    saveCapabilities(data);
+    await saveCapabilities(data);
 
     console.log(`[capabilities] Cached ${e164} — sms:${record.capabilities.sms} voice:${record.capabilities.voice}`);
     return record;
@@ -129,54 +142,22 @@ async function fetchSingleCapability(e164) {
 
 /**
  * No-op if the number is already cached. Otherwise fetches from Twilio.
- * Designed to be called fire-and-forget from webhook handlers.
+ * Designed to be called fire-and-forget (via backgroundTask) from webhook handlers.
  *
  * @param {string} e164
  */
 async function checkAndCacheCapabilities(e164) {
-  const { numbers } = loadCapabilities();
+  const { numbers } = await loadCapabilities();
   if (numbers[e164]) return;
   await fetchSingleCapability(e164);
 }
 
 /**
  * Returns the full capabilities store.
- * Used by the GET /capabilities route.
+ * Used by the GET /capabilities route and the App Home view.
  */
-function getCapabilities() {
+async function getCapabilities() {
   return loadCapabilities();
-}
-
-// ─── Scheduler ────────────────────────────────────────────────────────────────
-
-/**
- * Called once at server startup.
- * - Registers a cron job to re-sync every ~14 days (3 AM on day 1 and 15 of each month)
- * - If the store is stale or missing, fires a full sync immediately (non-blocking)
- */
-function initCapabilitiesSync() {
-  if (!getSetting('twilio.accountSid') || !getSetting('twilio.authToken')) {
-    console.warn('[capabilities] Missing Twilio credentials — capability sync disabled');
-    return;
-  }
-
-  // Run at 3 AM on the 1st and 15th of every month (~every 14 days)
-  cron.schedule('0 3 1,15 * *', () => {
-    console.log('[capabilities] Scheduled sync triggered');
-    syncAllCapabilities().catch((err) =>
-      console.error('[capabilities] Scheduled sync error:', err.message)
-    );
-  });
-
-  const { lastSyncedAt } = loadCapabilities();
-  if (isStale(lastSyncedAt)) {
-    console.log('[capabilities] Store is stale or missing — running initial sync');
-    syncAllCapabilities().catch((err) =>
-      console.error('[capabilities] Initial sync error:', err.message)
-    );
-  } else {
-    console.log(`[capabilities] Store is fresh (last synced: ${lastSyncedAt})`);
-  }
 }
 
 /**
@@ -190,7 +171,7 @@ async function connectNumberToWalkieTalkie(phone) {
   const baseUrl = process.env.WEBHOOK_BASE_URL;
   if (!baseUrl) throw new Error('WEBHOOK_BASE_URL is not configured');
 
-  let record = loadCapabilities().numbers[phone];
+  let record = (await loadCapabilities()).numbers[phone];
   if (!record) {
     record = await fetchSingleCapability(phone);
   }
@@ -213,7 +194,7 @@ async function connectNumberToWalkieTalkie(phone) {
     throw new Error(`Number ${phone} has no SMS or voice capabilities to connect`);
   }
 
-  const client = makeClient();
+  const client = await makeClient();
   await client.incomingPhoneNumbers(sid).update(update);
 
   console.log(`[capabilities] Connected ${phone} → WalkieTalkie (sms:${!!capabilities.sms} voice:${!!capabilities.voice})`);
@@ -221,8 +202,8 @@ async function connectNumberToWalkieTalkie(phone) {
 }
 
 module.exports = {
-  initCapabilitiesSync,
   syncAllCapabilities,
+  syncIfStale,
   checkAndCacheCapabilities,
   getCapabilities,
   loadCapabilities,

@@ -1,0 +1,11 @@
+[      14ms] [ERROR] Failed to load resource: net::ERR_FILE_NOT_FOUND @ filesystem:https://docs.google.com/persistent/docs/fonts/JTUHjIg1_i6t8kCHKm4532VJOt5-QNFgpCtr6Ew7Y3tco6q5.woff2:0
+[      15ms] [ERROR] Failed to load resource: net::ERR_FILE_NOT_FOUND @ filesystem:https://docs.google.com/persistent/docs/fonts/JTUHjIg1_i6t8kCHKm4532VJOt5-QNFgpCuM70w7Y3tco6q5.woff2:0
+[      15ms] [ERROR] Failed to load resource: net::ERR_FILE_NOT_FOUND @ filesystem:https://docs.google.com/persistent/docs/fonts/JTUFjIg1_i6t8kCHKm459Wx7xQYXK0vOoz6jq6R9aXp-p7K4KLg.woff2:0
+[      15ms] [ERROR] Failed to load resource: net::ERR_FILE_NOT_FOUND @ filesystem:https://docs.google.com/persistent/docs/fonts/JTUFjIg1_i6t8kCHKm459Wx7xQYXK0vOoz6jq0N6aXp-p7K4KLg.woff2:0
+[      30ms] [ERROR] Failed to load resource: net::ERR_FAILED @ chrome-extension://invalid/:0
+[    1709ms] [LOG] media copier is null:  false @ https://docs.google.com/static/document/client/js/397041667-client_js_prod_kix_core.js:4530
+[    2146ms] [ERROR] Failed to load resource: net::ERR_FAILED @ chrome-extension://invalid/:0
+[    2188ms] [ERROR] Failed to load resource: net::ERR_FAILED @ chrome-extension://invalid/:0
+[    2281ms] [ERROR] Failed to load resource: net::ERR_FAILED @ chrome-extension://invalid/:0
+[    2338ms] [ERROR] Failed to load resource: net::ERR_FAILED @ chrome-extension://invalid/:0
+[    2344ms] [WARNING] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing. @ https://docs.google.com/drivesharing/clientmodel?id=17vruCEhUsJiYT5D_-61OMXv2k0JdbLNSxemoaG3k5NE&foreignService=kix&authuser=0&origin=https%3A%2F%2Fdocs.google.com:0

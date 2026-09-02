@@ -1,25 +1,24 @@
-const fs = require('fs');
-const path = require('path');
+const store = require('./store');
 
-const LOG_PATH = path.join(__dirname, '../../data/logs.json');
+const LOGS_KEY = 'logs';
+const MAX_ENTRIES = 1000;
 
-function loadLogs() {
+/**
+ * Returns transaction log entries, newest first.
+ *
+ * @returns {Promise<object[]>}
+ */
+async function loadLogs() {
   try {
-    if (!fs.existsSync(LOG_PATH)) return [];
-    return JSON.parse(fs.readFileSync(LOG_PATH, 'utf8'));
-  } catch {
+    return await store.listRange(LOGS_KEY);
+  } catch (err) {
+    console.error('[logger] Failed to load logs:', err.message);
     return [];
   }
 }
 
-function saveLogs(logs) {
-  const dir = path.dirname(LOG_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(LOG_PATH, JSON.stringify(logs, null, 2));
-}
-
 /**
- * Appends a transaction record to data/logs.json.
+ * Appends a transaction record to the log (capped at 1000 entries).
  *
  * @param {object} entry
  * @param {'sms'|'voice-recording'|'voice-transcription'} [entry.type='sms']
@@ -36,16 +35,16 @@ function saveLogs(logs) {
  * @param {'success'|'error'} entry.status
  * @param {string} [entry.error]      Error message if status is 'error'
  */
-function logTransaction(entry) {
-  const logs = loadLogs();
-  logs.unshift({
-    id: Date.now(),
-    timestamp: new Date().toISOString(),
-    type: 'sms',
-    ...entry,
-  });
-  // Keep last 1000 entries
-  saveLogs(logs.slice(0, 1000));
+async function logTransaction(entry) {
+  try {
+    await store.listPush(
+      LOGS_KEY,
+      { id: Date.now(), timestamp: new Date().toISOString(), type: 'sms', ...entry },
+      MAX_ENTRIES
+    );
+  } catch (err) {
+    console.error('[logger] Failed to write log entry:', err.message);
+  }
 }
 
 module.exports = { logTransaction, loadLogs };
