@@ -10,7 +10,7 @@ const { saveCallThread, getCallThread, updateCallThread } = require('../services
 const { logTransaction } = require('../services/logger');
 const { sendCallStartToSlack, postToThread, parseOtp, buildCallTranscriptBlocks } = require('../services/slack');
 const { backgroundTask } = require('../services/background');
-const { detectKeypress } = require('../services/ivrKeypress');
+const { detectKeypress, detectKeypressSmart } = require('../services/ivrKeypress');
 const store = require('../services/store');
 
 const router = express.Router();
@@ -273,15 +273,30 @@ router.post('/transcription', twilioValidate, async (req, res) => {
   backgroundTask(handleLiveTranscript(CallSid, transcript, isFinal));
 });
 
-async function handleLiveTranscript(callSid, transcript, isFinal) {
-  if (isFinal) {
-    await store
-      .listPush(ivrLogKey(callSid), transcript, IVR_LOG_MAX_SEGMENTS, IVR_LOG_TTL_SECONDS)
-      .catch((err) => console.error('[voice] Failed to store live transcript:', err.message));
-  }
+// How many trailing final segments are joined before detection, so a prompt
+// split across segments ("aprieta la línea," / "la tecla ocho") still matches.
+const IVR_CONTEXT_SEGMENTS = 3;
 
-  const keypress = detectKeypress(transcript);
+async function handleLiveTranscript(callSid, transcript, isFinal) {
+  // Partial results are noisy and repeat: regex only, on the fragment itself.
+  // Final results: store, then run the two-layer detector (regex → LLM) over
+  // the last few segments joined together.
+  let keypress = detectKeypress(transcript);
+  if (isFinal) {
+    let context = transcript;
+    try {
+      await store.listPush(ivrLogKey(callSid), transcript, IVR_LOG_MAX_SEGMENTS, IVR_LOG_TTL_SECONDS);
+      if (!keypress) {
+        const recent = await store.listRange(ivrLogKey(callSid), 0, IVR_CONTEXT_SEGMENTS - 1);
+        if (recent.length > 1) context = recent.reverse().join(' ');
+      }
+    } catch (err) {
+      console.error('[voice] Failed to store live transcript:', err.message);
+    }
+    if (!keypress) keypress = await detectKeypressSmart(context);
+  }
   if (!keypress) return;
+  const source = keypress.source || 'regex';
 
   // One-shot lock: partial + final results repeat the same phrase, and several
   // callback invocations may run concurrently on Vercel.
@@ -292,7 +307,7 @@ async function handleLiveTranscript(callSid, transcript, isFinal) {
   );
   if (!acquired) return;
 
-  console.log(`[voice] IVR asks for key "${keypress.digit}"  CallSid=${callSid}  ("${keypress.matched}")`);
+  console.log(`[voice] IVR asks for key "${keypress.digit}"  CallSid=${callSid}  via=${source}  ("${keypress.matched}")`);
 
   const thread = await getCallThread(callSid);
   try {
@@ -310,13 +325,14 @@ async function handleLiveTranscript(callSid, transcript, isFinal) {
     return;
   }
 
-  await updateCallThread(callSid, { keypress: keypress.digit, keypressMatched: keypress.matched });
+  await updateCallThread(callSid, { keypress: keypress.digit, keypressMatched: keypress.matched, keypressSource: source });
 
   if (thread) {
+    const via = source === 'llm' ? ' _(entendido por IA)_' : '';
     await postToThread(
       thread.channel,
       thread.threadTs,
-      [{ type: 'context', elements: [{ type: 'mrkdwn', text: `_🔢 IVR asked for key *${keypress.digit}* ("${keypress.matched}") — pressed automatically._` }] }],
+      [{ type: 'context', elements: [{ type: 'mrkdwn', text: `_🔢 IVR asked for key *${keypress.digit}* ("${keypress.matched}") — pressed automatically.${via}_` }] }],
       `🔢 Pressed key ${keypress.digit} as requested by the IVR`
     );
     await logTransaction({
@@ -329,6 +345,7 @@ async function handleLiveTranscript(callSid, transcript, isFinal) {
       otp: null,
       keypress: keypress.digit,
       matched: keypress.matched,
+      source,
       status: 'success',
     });
   }

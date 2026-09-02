@@ -53,7 +53,8 @@ scripts/
 | `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) |
 | `SLACK_SIGNING_SECRET` | Slack app signing secret (Basic Information page) |
 | `SLACK_DEFAULT_CHANNEL` | Slack channel ID for numbers with no override |
-| `GROQ_API_KEY` | Optional — enables Groq Whisper transcription |
+| `GROQ_API_KEY` | Optional — enables Groq Whisper transcription and the LLM layer of IVR keypress detection |
+| `IVR_KEYPRESS_LLM_MODEL` | Optional — Groq text model for keypress detection (default `qwen/qwen3.8-27b`) |
 | `ADMIN_SECRET` | Optional — protects /logs, /capabilities and /numbers.csv with bearer token auth |
 | `PORT` | Server port (default: 3000) |
 
@@ -98,6 +99,12 @@ lottery, so calls are now handled like this:
    `detectKeypress()` (`services/ivrKeypress.js`) looks for an instruction verb followed
    by a key — "press 9", "presione el 0", "aperte a tecla oito", "press pound" — in EN/ES/PT.
    Spoken codes ("your code is 1 6 9 4 2 9") never match because no verb precedes them.
+   **Two-layer detection** (`detectKeypressSmart()`): regex first (instant, free); if it misses
+   on a *final* segment, the last 3 final segments are joined and sent to a Groq text model
+   (`qwen/qwen3.8-27b`, override with `IVR_KEYPRESS_LLM_MODEL`) that must answer strict
+   JSON `{key, confidence}`; accepted only if confidence ≥ 0.7 and key is a valid DTMF key.
+   Partial segments are regex-only. Uses the existing `GROQ_API_KEY`; without it the LLM layer
+   is silently off. The Slack note says "(entendido por IA)" and the log carries `source: llm`.
 3. On the first match, a one-shot Redis lock (`ivrpress:<CallSid>`, SET NX) guarantees a
    single press, then the live call is redirected via REST (`calls(sid).update({ twiml })`)
    to `<Play digits="w<key>"/>` + a fresh `<Record>`. The thread gets a
@@ -121,7 +128,7 @@ any instruction detected the thread gets "🎧 IVR did not ask for any key. Hear
 App Home: a global "Tecla del IVR" section with ✏️ Edit (auto/none), a "Modo de tecla" select in
 the line modal (inherit/auto/fixed/none + digits field, validated), and a per-line badge
 (`🎧 Auto` / `🔢 Fijo: ww1` / `🚫 Sin tecla`, with `(default)` when inherited).
-Tests: `npm test` (`tests/ivrKeypress.test.js`, `tests/keypressMode.test.js`).
+Tests: `npm test` (`tests/ivrKeypress.test.js`, `tests/ivrKeypressLlm.test.js`, `tests/keypressMode.test.js`).
 
 ### ⚠️ Still known-broken
 **`getLanguage()` forces the wrong language into Whisper.** The IVR's language does not

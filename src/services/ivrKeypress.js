@@ -137,8 +137,124 @@ function resolveKeypressMode(entry, globalMode = DEFAULT_KEYPRESS_MODE) {
   return { mode, dtmf: mode === 'fixed' ? dtmf : null, source };
 }
 
+// ─── LLM fallback ─────────────────────────────────────────────────────────────
+//
+// The regex catches the phrasings we have seen; an LLM catches the ones we
+// haven't ("apretá el numerito ocho", garbled transcriptions, new languages).
+// It only runs when the regex finds nothing, on final transcript segments, and
+// it must answer strict JSON so a hallucinated digit can't leak into <Play>.
+
+const LLM_MODEL = process.env.IVR_KEYPRESS_LLM_MODEL || 'qwen/qwen3.8-27b';
+const LLM_MIN_CONFIDENCE = 0.7;
+const LLM_TIMEOUT_MS = 4_000;
+const LLM_MIN_WORDS = 3;
+
+const LLM_SYSTEM_PROMPT = `You read a fragment of a live transcript from an automated phone system (IVR). \
+It may be in Spanish, Portuguese or English and may contain speech-recognition errors.
+
+Decide whether the fragment instructs the listener to press ONE phone key right now \
+(e.g. "para continuar, aprieta la tecla ocho", "press 9 to confirm", "aperte a tecla 1").
+
+Rules:
+- "key" is the single key to press: "0"-"9", "#" (pound/numeral/almohadilla) or "*" (star/asterisco). Otherwise null.
+- If the fragment is reading out a verification code ("su código es 1 6 9 4 2 9", "your code is 482913"), key MUST be null.
+- If several keys are offered, choose the one for continuing/receiving/confirming the code.
+- Never guess. If unsure, key null and low confidence.
+
+Answer ONLY with JSON: {"key": string|null, "confidence": number between 0 and 1}`;
+
+let defaultGroqClient = null;
+function getGroqClient() {
+  if (!process.env.GROQ_API_KEY) return null;
+  if (!defaultGroqClient) {
+    const Groq = require('groq-sdk');
+    defaultGroqClient = new Groq({ apiKey: process.env.GROQ_API_KEY, timeout: LLM_TIMEOUT_MS, maxRetries: 0 });
+  }
+  return defaultGroqClient;
+}
+
+/**
+ * Normalizes the model's JSON answer into a keypress result or null.
+ * Exported for tests; tolerant of "8"/8/"eight"-style answers.
+ *
+ * @param {string} raw            model output (should be JSON)
+ * @param {number} [minConfidence]
+ * @returns {{ digit: string, confidence: number } | null}
+ */
+function parseLlmKeypress(raw, minConfidence = LLM_MIN_CONFIDENCE) {
+  if (!raw || typeof raw !== 'string') return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+
+  const keyRaw = parsed.key === null || parsed.key === undefined ? null : String(parsed.key).trim().toLowerCase();
+  if (!keyRaw) return null;
+  const digit = WORD_TO_KEY[normalize(keyRaw)];
+  if (!digit) return null;
+
+  const confidence = Number(parsed.confidence);
+  if (!Number.isFinite(confidence) || confidence < minConfidence) return null;
+
+  return { digit, confidence };
+}
+
+/**
+ * Asks the LLM whether `text` instructs to press a key. Returns null when the
+ * LLM is not configured, the text is too short, the call fails, or the model
+ * is not confident. Never throws.
+ *
+ * @param {string} text
+ * @param {{ client?: object }} [deps]  injectable Groq-like client for tests
+ * @returns {Promise<{ digit: string, matched: string, confidence: number } | null>}
+ */
+async function detectKeypressWithLlm(text, { client = getGroqClient() } = {}) {
+  if (!client || !text || typeof text !== 'string') return null;
+  if (text.trim().split(/\s+/).length < LLM_MIN_WORDS) return null;
+
+  try {
+    const completion = await client.chat.completions.create({
+      model: LLM_MODEL,
+      temperature: 0,
+      max_tokens: 60,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: LLM_SYSTEM_PROMPT },
+        { role: 'user', content: text.trim() },
+      ],
+    });
+    const raw = completion?.choices?.[0]?.message?.content;
+    const result = parseLlmKeypress(raw);
+    return result ? { ...result, matched: text.trim().slice(0, 160) } : null;
+  } catch (err) {
+    console.error('[ivrKeypress] LLM detection failed:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
+ * Two-layer detection: regex first (instant, free), LLM fallback second.
+ *
+ * @param {string} text
+ * @param {{ useLlm?: boolean, client?: object }} [opts]
+ * @returns {Promise<{ digit: string, matched: string, source: 'regex'|'llm', confidence?: number } | null>}
+ */
+async function detectKeypressSmart(text, { useLlm = true, client } = {}) {
+  const byRegex = detectKeypress(text);
+  if (byRegex) return { ...byRegex, source: 'regex' };
+  if (!useLlm) return null;
+  const byLlm = await detectKeypressWithLlm(text, client ? { client } : {});
+  return byLlm ? { ...byLlm, source: 'llm' } : null;
+}
+
 module.exports = {
   detectKeypress,
+  detectKeypressWithLlm,
+  detectKeypressSmart,
+  parseLlmKeypress,
   KEYPRESS_MODES,
   DEFAULT_KEYPRESS_MODE,
   isKeypressMode,
