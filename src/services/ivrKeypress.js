@@ -15,11 +15,15 @@
 // lowercased and stripped of diacritics before matching, so entries here are
 // plain ASCII.
 const INSTRUCTION_VERBS = [
-  'press', 'hit',
-  'presione', 'presiona', 'presionar', 'oprima', 'oprime', 'oprimir',
+  // EN
+  'press', 'hit', 'select', 'choose',
+  // ES — includes voseo/imperative variants; accents are stripped before matching
+  'presione', 'presiona', 'presionar', 'oprima', 'oprime', 'oprimi', 'oprimir',
   'pulse', 'pulsa', 'pulsar', 'marque', 'marca', 'marcar',
-  'digite', 'digita', 'teclee', 'teclea', 'tecle',
-  'pressione', 'pressiona', 'aperte', 'aperta', 'prima', 'carregue', 'toque',
+  'aprieta', 'apriete', 'apreta', 'apretar',
+  'digite', 'digita', 'teclee', 'teclea', 'tecle', 'toca', 'toque', 'selecciona', 'seleccione',
+  // PT
+  'pressione', 'pressiona', 'aperte', 'aperta', 'prima', 'carregue', 'digitar', 'escolha',
 ];
 
 // Spoken forms of each DTMF key.
@@ -50,11 +54,13 @@ const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const keyTokens = Object.keys(WORD_TO_KEY).map(escapeRegex).join('|');
 const verbTokens = INSTRUCTION_VERBS.join('|');
 
-// verb, then up to 3 filler words ("the number", "la tecla", "o numero"),
-// then the key. The negative lookahead keeps "press 12" from matching "1"
-// and "start" from matching "star".
+// verb, then up to 6 filler words ("the number", "la tecla", "la linea, la
+// tecla" — Meta's real prompt), then the key. Filler is letters only, so a
+// digit is never skipped over; the lazy quantifier makes the first key win.
+// The negative lookahead keeps "press 12" from matching "1" and "start" from
+// matching "star".
 const INSTRUCTION_RE = new RegExp(
-  `\\b(?:${verbTokens})\\b(?:[\\s,]+[a-z]+){0,3}?[\\s,]+(${keyTokens})(?![a-z0-9])`,
+  `\\b(?:${verbTokens})\\b(?:[\\s,]+[a-z]+){0,6}?[\\s,]+(${keyTokens})(?![a-z0-9])`,
   'i'
 );
 

@@ -13,6 +13,11 @@ const cases = [
   ['Por favor oprima ocho para recibir su código', '8'],
   ['pulse la tecla uno', '1'],
   ['marque el número nueve', '9'],
+  // Real Meta prompt heard in production (1 Sep 2026), live + Whisper variants
+  ['Este es un mes, automático de Meta. Para continuar, aprieta la línea, la tecla ocho. Listo.', '8'],
+  ['este es un mensaje automático de meta para continuar aprieta la línea la tecla 8 listo', '8'],
+  ['Para continuar, apretá la tecla número cero', '0'],
+  ['Oprimí el uno para seguir', '1'],
   // Portuguese
   ['Para continuar, pressione 1', '1'],
   ['Aperte a tecla oito', '8'],
