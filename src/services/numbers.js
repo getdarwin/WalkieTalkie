@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const store = require('./store');
 const { getSetting } = require('./settings');
+const { resolveKeypressMode, isKeypressMode, DEFAULT_KEYPRESS_MODE } = require('./ivrKeypress');
 
 const NUMBERS_KEY = 'numbers';
 const SEED_PATH = path.join(__dirname, '../../config/numbers.json');
@@ -80,6 +81,24 @@ async function getDtmf(phoneNumber) {
   return null;
 }
 
+/** Workspace-wide keypress mode ("auto" | "none"); lines may override it. */
+async function getGlobalKeypressMode() {
+  const value = await getSetting('ivr.keypressMode');
+  return isKeypressMode(value) ? value : DEFAULT_KEYPRESS_MODE;
+}
+
+/**
+ * Effective IVR keypress behaviour for a Twilio "To" number: the line's own
+ * `keypressMode` when set, otherwise the workspace default.
+ *
+ * @param {string} phoneNumber  E.164 format
+ * @returns {Promise<{ mode: 'auto'|'fixed'|'none', dtmf: string|null, source: 'line'|'global' }>}
+ */
+async function getKeypressConfig(phoneNumber) {
+  const [{ numbers }, globalMode] = await Promise.all([loadConfig(), getGlobalKeypressMode()]);
+  return resolveKeypressMode(numbers[phoneNumber], globalMode);
+}
+
 /**
  * Returns the transcription language ISO-639-1 code for a number (e.g. "es", "pt").
  * Returns null if not configured — Whisper will auto-detect.
@@ -101,9 +120,10 @@ async function getLanguage(phoneNumber) {
  * If name and channel are both empty, stores a simple string (empty string).
  *
  * @param {string} phoneNumber  E.164 format
- * @param {{ name?: string, channel?: string, dtmf?: string, language?: string }} opts
+ * @param {{ name?: string, channel?: string, dtmf?: string, language?: string, keypressMode?: string, routing?: string }} opts
+ *   keypressMode: "auto" | "fixed" | "none"; empty string = inherit the global default
  */
-async function setNumber(phoneNumber, { name = '', channel = '', dtmf = '', language = '', routing = '' } = {}) {
+async function setNumber(phoneNumber, { name = '', channel = '', dtmf = '', language = '', keypressMode = '', routing = '' } = {}) {
   const { numbers } = await loadConfig();
   const updated = { ...numbers };
 
@@ -118,6 +138,7 @@ async function setNumber(phoneNumber, { name = '', channel = '', dtmf = '', lang
   if (channel) entry.channel = channel;
   if (dtmf) entry.dtmf = dtmf;
   if (language) entry.language = language;
+  if (isKeypressMode(keypressMode)) entry.keypressMode = keypressMode;
   if (preservedRouting) entry.routing = preservedRouting;
 
   const keys = Object.keys(entry);
@@ -153,4 +174,15 @@ async function replaceAllNumbers(numbersMap) {
   await saveNumbers(numbersMap);
 }
 
-module.exports = { loadConfig, getFriendlyName, getChannel, getDtmf, getLanguage, setNumber, removeNumber, replaceAllNumbers };
+module.exports = {
+  loadConfig,
+  getFriendlyName,
+  getChannel,
+  getDtmf,
+  getLanguage,
+  getGlobalKeypressMode,
+  getKeypressConfig,
+  setNumber,
+  removeNumber,
+  replaceAllNumbers,
+};

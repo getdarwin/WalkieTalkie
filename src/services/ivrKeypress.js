@@ -84,4 +84,58 @@ function detectKeypress(text) {
   return { digit, matched: match[0].trim() };
 }
 
-module.exports = { detectKeypress };
+// ─── Keypress mode ────────────────────────────────────────────────────────────
+//
+//   auto  → listen to the IVR live and press whatever key it asks for (default)
+//   fixed → always press the line's configured `dtmf` digits after answering
+//   none  → never press anything
+//
+// A line without an explicit mode inherits the global setting
+// (`ivr.keypressMode`, default "auto").
+
+const KEYPRESS_MODES = Object.freeze(['auto', 'fixed', 'none']);
+const DEFAULT_KEYPRESS_MODE = 'auto';
+
+// Only digits, "w" (0.5s pause), "#" and "*" are valid <Play digits> content —
+// anything else would be TwiML injection since the value is user-configurable.
+const DTMF_RE = /^[0-9w#*]+$/i;
+
+function isKeypressMode(value) {
+  return KEYPRESS_MODES.includes(value);
+}
+
+/** Returns the digits if they are safe to embed in <Play digits>, else null. */
+function sanitizeDtmf(value) {
+  const str = (value || '').trim();
+  return str && DTMF_RE.test(str) ? str : null;
+}
+
+/**
+ * Resolves the effective keypress configuration for a directory entry.
+ * A "fixed" mode without valid digits degrades to "none" so a misconfigured
+ * line never sends garbage tones.
+ *
+ * @param {string|object|undefined} entry       numbers.json entry
+ * @param {string} [globalMode]                 workspace default
+ * @returns {{ mode: 'auto'|'fixed'|'none', dtmf: string|null, source: 'line'|'global' }}
+ */
+function resolveKeypressMode(entry, globalMode = DEFAULT_KEYPRESS_MODE) {
+  const lineMode = entry && typeof entry === 'object' ? entry.keypressMode : undefined;
+  const dtmf = entry && typeof entry === 'object' ? sanitizeDtmf(entry.dtmf) : null;
+  const fallback = isKeypressMode(globalMode) ? globalMode : DEFAULT_KEYPRESS_MODE;
+
+  const source = isKeypressMode(lineMode) ? 'line' : 'global';
+  let mode = source === 'line' ? lineMode : fallback;
+  if (mode === 'fixed' && !dtmf) mode = 'none';
+
+  return { mode, dtmf: mode === 'fixed' ? dtmf : null, source };
+}
+
+module.exports = {
+  detectKeypress,
+  KEYPRESS_MODES,
+  DEFAULT_KEYPRESS_MODE,
+  isKeypressMode,
+  sanitizeDtmf,
+  resolveKeypressMode,
+};

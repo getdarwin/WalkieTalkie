@@ -4,7 +4,7 @@ const Groq = require('groq-sdk');
 const twilio = require('twilio');
 const twilioValidate = require('../middleware/twilioValidate');
 const { getSetting } = require('../services/settings');
-const { getFriendlyName, getChannel, getLanguage } = require('../services/numbers');
+const { getFriendlyName, getChannel, getLanguage, getKeypressConfig } = require('../services/numbers');
 const { checkAndCacheCapabilities } = require('../services/capabilities');
 const { saveCallThread, getCallThread, updateCallThread } = require('../services/callThreads');
 const { logTransaction } = require('../services/logger');
@@ -198,27 +198,47 @@ router.post('/', twilioValidate, async (req, res) => {
 
   backgroundTask(checkAndCacheCapabilities(To));
 
-  const friendlyName = await getFriendlyName(To);
-  const channel = await getChannel(To);
+  const [friendlyName, channel, keypress] = await Promise.all([
+    getFriendlyName(To),
+    getChannel(To),
+    getKeypressConfig(To),
+  ]);
 
   try {
     const threadTs = await sendCallStartToSlack({ channel, friendlyName, toNumber: To, fromNumber: From });
-    await saveCallThread(CallSid, { channel, threadTs, toNumber: To, fromNumber: From, friendlyName });
+    await saveCallThread(CallSid, {
+      channel, threadTs, toNumber: To, fromNumber: From, friendlyName,
+      keypressMode: keypress.mode,
+    });
   } catch (err) {
     console.error('[voice] Failed to post call start to Slack:', err.message);
   }
 
-  // Record from second zero AND transcribe the caller live. Meta's verification
-  // IVR gates the call behind an anti-bot keypress whose digit changes between
-  // calls ("press 9", "presione el 0", "aperte 8"), so a fixed per-line DTMF
-  // never worked. The /transcription callback below reads the instruction from
-  // the live transcript and presses the key on the running call.
-  const baseUrl = process.env.WEBHOOK_BASE_URL;
-  twimlResponse(res, `
-    ${liveTranscriptionTwiml(baseUrl, CallSid)}
-    ${recordTwiml(baseUrl)}
-  `);
+  console.log(`[voice] Keypress mode=${keypress.mode} (${keypress.source})  To=${To}`);
+  twimlResponse(res, buildAnswerTwiml(CallSid, keypress));
 });
+
+/**
+ * TwiML for answering a call, according to the line's keypress mode:
+ *
+ *   auto  → <Start><Transcription> + <Record> from second zero. Meta's
+ *           verification IVR gates the call behind an anti-bot keypress whose
+ *           digit changes between calls ("press 9", "presione el 0", "aperte 8"),
+ *           so /transcription reads the instruction live and presses the key.
+ *   fixed → legacy behaviour: wait, <Play digits> the configured tones, record.
+ *   none  → just record.
+ */
+function buildAnswerTwiml(callSid, keypress) {
+  const baseUrl = process.env.WEBHOOK_BASE_URL;
+  switch (keypress.mode) {
+    case 'auto':
+      return `${liveTranscriptionTwiml(baseUrl, callSid)}${recordTwiml(baseUrl)}`;
+    case 'fixed':
+      return `<Pause length="3"/><Play digits="${keypress.dtmf}"/><Pause length="1"/>${recordTwiml(baseUrl)}`;
+    default:
+      return recordTwiml(baseUrl);
+  }
+}
 
 // ─── POST /twilio-voice/transcription ─────────────────────────────────────────
 // Real-Time Transcription statusCallback. Fires many times per call:
@@ -426,6 +446,18 @@ async function processRecording(CallSid, RecordingUrl, RecordingDuration) {
     ]);
 
     console.log(`[voice] Audio uploaded to Slack  CallSid=${CallSid}`);
+
+    // Auto mode but the IVR never asked for a key: say so, with what was heard,
+    // so Ops can tell "no gate this time" from "detector missed the phrase".
+    if (thread.keypressMode === 'auto' && !thread.keypress) {
+      const heard = liveTranscript ? `"${liveTranscript.slice(0, 300)}${liveTranscript.length > 300 ? '…' : ''}"` : '_(no speech detected live)_';
+      await postToThread(
+        thread.channel,
+        thread.threadTs,
+        [{ type: 'context', elements: [{ type: 'mrkdwn', text: `_🎧 IVR did not ask for any key. Heard live: ${heard}_` }] }],
+        '🎧 IVR did not ask for any key'
+      );
+    }
 
     // Post transcript if we got one
     if (transcript) {

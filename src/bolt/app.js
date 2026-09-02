@@ -2,7 +2,8 @@ const { App, ExpressReceiver } = require('@slack/bolt');
 const store = require('../services/store');
 const { backgroundTask } = require('../services/background');
 const { setSetting, getSetting } = require('../services/settings');
-const { setNumber, removeNumber, loadConfig, replaceAllNumbers } = require('../services/numbers');
+const { setNumber, removeNumber, loadConfig, replaceAllNumbers, getGlobalKeypressMode } = require('../services/numbers');
+const { isKeypressMode, sanitizeDtmf } = require('../services/ivrKeypress');
 const { syncAllCapabilities, connectNumberToWalkieTalkie } = require('../services/capabilities');
 const {
   buildAppHomeView,
@@ -16,6 +17,7 @@ const {
   buildCsvConfirmModal,
   buildConnectModal,
   buildFindLineModal,
+  buildKeypressModeModal,
 } = require('./views');
 const { loadLogs } = require('../services/logger');
 
@@ -164,6 +166,27 @@ boltApp.action('action_edit_default_channel', async ({ ack, client, body }) => {
   }
 });
 
+boltApp.action('action_edit_keypress_mode', async ({ ack, client, body }) => {
+  await ack();
+  if (await denyIfNotAdmin(client, body)) return;
+  try {
+    const current = await getGlobalKeypressMode();
+    await client.views.open({ trigger_id: body.trigger_id, view: buildKeypressModeModal(current) });
+  } catch (err) {
+    console.error('[bolt] Failed to open keypress mode modal:', err.message);
+  }
+});
+
+boltApp.view('modal_keypress_mode', async ({ ack, view, client, body }) => {
+  await ack();
+  if (await denyIfNotAdmin(client, body)) return;
+  const mode = view.state.values.block_keypress_mode?.input_keypress_mode?.selected_option?.value;
+  if (isKeypressMode(mode)) await setSetting('ivr.keypressMode', mode);
+  await publishAppHome(client, body.user.id, {
+    statusText: `:white_check_mark: Tecla del IVR por default: *${mode === 'auto' ? 'Automático' : 'Ninguno'}*.`,
+  });
+});
+
 boltApp.action('action_sync_twilio', async ({ ack, client, body }) => {
   await ack();
   if (await denyIfNotAdmin(client, body)) return;
@@ -185,7 +208,7 @@ boltApp.action('action_add_number', async ({ ack, client, body }) => {
   await ack();
   if (await denyIfNotAdmin(client, body)) return;
   try {
-    await client.views.open({ trigger_id: body.trigger_id, view: buildNumberModal() });
+    await client.views.open({ trigger_id: body.trigger_id, view: buildNumberModal('', null, await getGlobalKeypressMode()) });
   } catch (err) {
     console.error('[bolt] Failed to open add number modal:', err.message);
   }
@@ -309,7 +332,7 @@ boltApp.action(/^action_number_menu__/, async ({ ack, client, body, action }) =>
     } else if (op === 'edit') {
       await client.views.open({
         trigger_id: body.trigger_id,
-        view: buildNumberModal(phone, entry),
+        view: buildNumberModal(phone, entry, await getGlobalKeypressMode()),
       });
     }
   } catch (err) {
@@ -347,14 +370,21 @@ boltApp.view('modal_number', async ({ ack, view, client, body }) => {
   const channel = values.block_channel.input_channel?.selected_channel || '';
   const dtmf = values.block_dtmf?.input_dtmf?.value?.trim() || '';
   const language = values.block_language?.input_language?.selected_option?.value || '';
+  const selectedMode = values.block_keypress_mode?.input_keypress_mode?.selected_option?.value || 'inherit';
+  const keypressMode = isKeypressMode(selectedMode) ? selectedMode : '';
 
+  const errors = {};
   if (!E164_RE.test(phone)) {
-    await ack({
-      response_action: 'errors',
-      errors: {
-        block_phone: 'Could not parse this as a valid phone number. Include the country code, e.g. +52 999 489 0783 or 52 999 489 0783.',
-      },
-    });
+    errors.block_phone = 'Could not parse this as a valid phone number. Include the country code, e.g. +52 999 489 0783 or 52 999 489 0783.';
+  }
+  if (dtmf && !sanitizeDtmf(dtmf)) {
+    errors.block_dtmf = 'Solo dígitos 0-9, "w", "#" y "*" — p. ej. "ww1".';
+  }
+  if (keypressMode === 'fixed' && !sanitizeDtmf(dtmf)) {
+    errors.block_dtmf = 'El modo Fijo necesita los dígitos a pulsar — p. ej. "ww1".';
+  }
+  if (Object.keys(errors).length > 0) {
+    await ack({ response_action: 'errors', errors });
     return;
   }
 
@@ -366,7 +396,7 @@ boltApp.view('modal_number', async ({ ack, view, client, body }) => {
   const existingRouting = (existingEntry && typeof existingEntry === 'object' && existingEntry.routing) || '';
   const isExternal = EXTERNAL_ROUTING_PROVIDERS.has(existingRouting.toLowerCase());
 
-  await setNumber(phone, { name, channel, dtmf, language });
+  await setNumber(phone, { name, channel, dtmf, language, keypressMode });
 
   let notifText = `✓ ${phone}${name ? ` (${name})` : ''} guardado.`;
 
@@ -444,7 +474,7 @@ boltApp.view('modal_find_line', async ({ ack, view }) => {
 
   await ack({
     response_action: 'push',
-    view: buildNumberModal(phone, entry),
+    view: buildNumberModal(phone, entry, await getGlobalKeypressMode()),
   });
 });
 
@@ -458,10 +488,17 @@ function buildNumbersMapFromRows(rows) {
     const routing = (row.routing || '').toLowerCase().trim();
     const isVapi = routing === 'vapi' || routing === 'talkyto';
 
+    const keypressMode = (row.keypress_mode || '').toLowerCase().trim();
+    const dtmf = sanitizeDtmf(row.dtmf) || '';
+    const language = (row.language || '').toLowerCase().trim();
+
     const entry = {};
     if (name) entry.name = name;
     if (channel) entry.channel = channel;
     if (isVapi) entry.routing = 'vapi';
+    if (isKeypressMode(keypressMode)) entry.keypressMode = keypressMode;
+    if (dtmf) entry.dtmf = dtmf;
+    if (/^[a-z]{2}$/.test(language)) entry.language = language;
 
     if (Object.keys(entry).length === 0) numbersMap[phone] = '';
     else if (Object.keys(entry).length === 1 && entry.name) numbersMap[phone] = name;

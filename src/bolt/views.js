@@ -1,6 +1,27 @@
 const { getSetting } = require('../services/settings');
-const { loadConfig } = require('../services/numbers');
+const { loadConfig, getGlobalKeypressMode } = require('../services/numbers');
 const { getCapabilities } = require('../services/capabilities');
+const { resolveKeypressMode } = require('../services/ivrKeypress');
+
+// ─── Keypress mode labels ─────────────────────────────────────────────────────
+
+const KEYPRESS_MODE_LABELS = {
+  auto: '🎧 Automático — escucha el IVR y pulsa la tecla que pida',
+  fixed: '🔢 Fijo — pulsa siempre los dígitos configurados',
+  none: '🚫 Ninguno — no pulsa nada',
+};
+
+const KEYPRESS_MODE_OPTIONS = Object.entries(KEYPRESS_MODE_LABELS).map(([value, text]) => ({
+  text: { type: 'plain_text', text, emoji: true },
+  value,
+}));
+
+/** Short badge for the line list: "🎧 Auto", "🔢 Fijo: ww1", "🚫 Sin tecla". */
+function keypressBadge(entry, globalMode) {
+  const { mode, dtmf, source } = resolveKeypressMode(entry, globalMode);
+  const label = mode === 'auto' ? '🎧 Auto' : mode === 'fixed' ? `🔢 Fijo: ${dtmf}` : '🚫 Sin tecla';
+  return source === 'global' ? `${label} _(default)_` : label;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -19,12 +40,13 @@ function relativeTime(isoString) {
  * Called on every home_opened event and after any config change.
  */
 async function buildAppHomeView({ statusText = null } = {}) {
-  const [accountSidRaw, authTokenRaw, defaultChannelRaw, config, caps] = await Promise.all([
+  const [accountSidRaw, authTokenRaw, defaultChannelRaw, config, caps, globalKeypressMode] = await Promise.all([
     getSetting('twilio.accountSid'),
     getSetting('twilio.authToken'),
     getSetting('slack.defaultChannel'),
     loadConfig(),
     getCapabilities(),
+    getGlobalKeypressMode(),
   ]);
   const accountSid = accountSidRaw || '';
   const authToken = authTokenRaw || '';
@@ -100,6 +122,21 @@ async function buildAppHomeView({ statusText = null } = {}) {
     },
     { type: 'divider' },
 
+    // ─── IVR Keypress (global default) ────────────────────────────────────────
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Tecla del IVR (default para todas las líneas)*\n${KEYPRESS_MODE_LABELS[globalKeypressMode]}\n_Meta cambia el dígito en cada llamada de verificación; en Automático WalkieTalkie lo lee en vivo y lo pulsa. Cada línea puede tener su propio modo desde ✏️ Edit._`,
+      },
+      accessory: {
+        type: 'button',
+        text: { type: 'plain_text', text: '✏️ Edit', emoji: true },
+        action_id: 'action_edit_keypress_mode',
+      },
+    },
+    { type: 'divider' },
+
     // ─── Sync + Logs Buttons ──────────────────────────────────────────────────
     {
       type: 'actions',
@@ -135,7 +172,7 @@ async function buildAppHomeView({ statusText = null } = {}) {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `Download the CSV, edit names and channels in any spreadsheet app, then paste the contents back using *Upload CSV*.\n\nCSV columns: \`phone_number\`, \`friendly_name\`, \`channel_id\`, \`routing\` (\`walkietalkie\` or \`vapi\`), \`sms\`, \`voice\``,
+        text: `Download the CSV, edit names and channels in any spreadsheet app, then paste the contents back using *Upload CSV*.\n\nCSV columns: \`phone_number\`, \`friendly_name\`, \`channel_id\`, \`routing\` (\`walkietalkie\` or \`vapi\`), \`sms\`, \`voice\`, \`keypress_mode\` (\`auto\`, \`fixed\`, \`none\` or blank = default), \`dtmf\`, \`language\``,
       },
     },
     {
@@ -193,12 +230,13 @@ async function buildAppHomeView({ statusText = null } = {}) {
       const connBadge = !cap || !baseUrl || isExternal
         ? ''
         : (smsConn || voiceConn) ? '  🟢' : '  🔴';
+      const keyBadge = isExternal ? '' : `  |  ${keypressBadge(entry, globalKeypressMode)}`;
 
       blocks.push({
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*${name || '_(no name)_'}*  \`${phone}\`${routingBadge}\n→ ${channelDisplay}  |  ${capBadges}${connBadge}`,
+          text: `*${name || '_(no name)_'}*  \`${phone}\`${routingBadge}\n→ ${channelDisplay}  |  ${capBadges}${connBadge}${keyBadge}`,
         },
         accessory: {
           type: 'overflow',
@@ -310,12 +348,19 @@ const LANGUAGE_OPTIONS = [
   { text: { type: 'plain_text', text: '🇸🇦 Arabic (ar)' }, value: 'ar' },
 ];
 
-function buildNumberModal(phone = '', entry = null) {
+function buildNumberModal(phone = '', entry = null, globalKeypressMode = 'auto') {
   const isEdit = !!phone;
   const name = entry ? (typeof entry === 'string' ? entry : entry.name || '') : '';
   const channel = entry && typeof entry === 'object' ? entry.channel || '' : '';
   const dtmf = entry && typeof entry === 'object' ? entry.dtmf || '' : '';
   const language = entry && typeof entry === 'object' ? entry.language || '' : '';
+  const keypressMode = entry && typeof entry === 'object' ? entry.keypressMode || '' : '';
+
+  const inheritOption = {
+    text: { type: 'plain_text', text: `↩️ Usar default global (${KEYPRESS_MODE_LABELS[globalKeypressMode].split(' — ')[0]})`, emoji: true },
+    value: 'inherit',
+  };
+  const keypressOptions = [inheritOption, ...KEYPRESS_MODE_OPTIONS];
 
   return {
     type: 'modal',
@@ -365,15 +410,28 @@ function buildNumberModal(phone = '', entry = null) {
       },
       {
         type: 'input',
-        block_id: 'block_dtmf',
-        label: { type: 'plain_text', text: 'Auto-press DTMF (deprecated, ignored)' },
+        block_id: 'block_keypress_mode',
+        label: { type: 'plain_text', text: 'Modo de tecla del IVR' },
         optional: true,
-        hint: { type: 'plain_text', text: 'Deprecated — no longer used on calls. WalkieTalkie now listens to the IVR live and presses whatever key it asks for (the digit changes on every Meta verification call). Kept only for reference.' },
+        hint: { type: 'plain_text', text: 'Automático (recomendado): escucha la llamada en vivo y pulsa la tecla que pida el IVR — Meta cambia el dígito en cada verificación. Fijo: solo para IVRs con menú estable.' },
+        element: {
+          type: 'static_select',
+          action_id: 'input_keypress_mode',
+          options: keypressOptions,
+          initial_option: keypressOptions.find((o) => o.value === (keypressMode || 'inherit')),
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'block_dtmf',
+        label: { type: 'plain_text', text: 'Dígitos fijos (solo en modo Fijo)' },
+        optional: true,
+        hint: { type: 'plain_text', text: 'Solo se usan si el modo es Fijo. Dígitos 0-9, # y *; "w" = pausa de 0.5s — p. ej. "ww1" espera 1s y pulsa 1.' },
         element: {
           type: 'plain_text_input',
           action_id: 'input_dtmf',
           ...(dtmf ? { initial_value: dtmf } : {}),
-          placeholder: { type: 'plain_text', text: 'e.g. 1' },
+          placeholder: { type: 'plain_text', text: 'e.g. ww1' },
           max_length: 20,
         },
       },
@@ -397,6 +455,38 @@ function buildNumberModal(phone = '', entry = null) {
           type: 'mrkdwn',
           text: '🔗 Al guardar, los webhooks de Twilio se conectan automáticamente a WalkieTalkie (excepto líneas con routing externo como VAPI).',
         }],
+      },
+    ],
+  };
+}
+
+/** Global default for the IVR keypress mode. "fixed" makes no sense globally. */
+function buildKeypressModeModal(currentMode = 'auto') {
+  const options = KEYPRESS_MODE_OPTIONS.filter((o) => o.value !== 'fixed');
+  return {
+    type: 'modal',
+    callback_id: 'modal_keypress_mode',
+    title: { type: 'plain_text', text: 'Tecla del IVR' },
+    submit: { type: 'plain_text', text: 'Save' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'Default para todas las líneas sin modo propio. En *Automático*, WalkieTalkie transcribe la llamada en vivo, detecta frases como "presione el 9" y pulsa esa tecla al instante; después sigue grabando el código.',
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'block_keypress_mode',
+        label: { type: 'plain_text', text: 'Modo default' },
+        element: {
+          type: 'static_select',
+          action_id: 'input_keypress_mode',
+          options,
+          initial_option: options.find((o) => o.value === currentMode) || options[0],
+        },
       },
     ],
   };
@@ -671,6 +761,7 @@ function buildFindLineModal() {
 }
 
 module.exports = {
+  buildKeypressModeModal,
   buildAppHomeView,
   buildCredentialsModal,
   buildDefaultChannelModal,

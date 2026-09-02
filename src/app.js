@@ -53,9 +53,11 @@ app.get('/capabilities', adminAuth, async (req, res) => {
 });
 
 // Number directory CSV export — used by the "Download CSV" button in Slack App Home
-// Columns: phone_number, friendly_name, channel_id, routing, sms, voice
+// Columns: phone_number, friendly_name, channel_id, routing, sms, voice, keypress_mode, dtmf, language
 //   routing: "walkietalkie" or "vapi" (detected from Twilio voiceUrl/smsUrl in capabilities cache)
 //   sms/voice: yes/no from capabilities cache (blank if not yet scanned)
+//   keypress_mode: auto | fixed | none — blank means "inherit the global default"
+//   dtmf: digits pressed in fixed mode; language: forced Whisper language (blank = auto)
 // Escapes a CSV field: neutralizes spreadsheet formula injection (=, +, -, @)
 // and quotes fields containing commas, quotes, or newlines.
 function csvField(value) {
@@ -69,7 +71,7 @@ function csvField(value) {
 app.get('/numbers.csv', adminAuth, async (req, res) => {
   const { numbers } = await loadConfig();
   const caps = (await getCapabilities()).numbers;
-  const rows = ['phone_number,friendly_name,channel_id,routing,sms,voice'];
+  const rows = ['phone_number,friendly_name,channel_id,routing,sms,voice,keypress_mode,dtmf,language'];
 
   for (const [phone, entry] of Object.entries(numbers)) {
     const name = typeof entry === 'string' ? entry : (entry.name || '');
@@ -84,7 +86,12 @@ app.get('/numbers.csv', adminAuth, async (req, res) => {
       ? entry.routing
       : (cap ? 'walkietalkie' : 'unknown');
 
-    rows.push([phone, name, channel, routing, sms, voice].map(csvField).join(','));
+    const isObj = entry && typeof entry === 'object';
+    const keypressMode = isObj ? (entry.keypressMode || '') : '';
+    const dtmf = isObj ? (entry.dtmf || '') : '';
+    const language = isObj ? (entry.language || '') : '';
+
+    rows.push([phone, name, channel, routing, sms, voice, keypressMode, dtmf, language].map(csvField).join(','));
   }
 
   res.setHeader('Content-Type', 'text/csv');

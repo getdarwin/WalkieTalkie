@@ -108,8 +108,20 @@ lottery, so calls are now handled like this:
 5. Final live-transcript segments are kept in `ivrlog:<CallSid>` (24h TTL) and attached to
    the `voice-recording` log entry as `liveTranscript` for debugging.
 
-The per-line `dtmf` field is **deprecated and ignored** on calls (still stored/displayed
-so existing directories don't break). Tests: `npm test` (`tests/ivrKeypress.test.js`).
+**Keypress modes.** Behaviour is driven by a per-line `keypressMode` with a workspace
+default (`ivr.keypressMode` setting, default `auto`), resolved by `resolveKeypressMode()`:
+- `auto` (default) — the live-detection flow above.
+- `fixed` — legacy behaviour: `<Pause 3s>` + `<Play digits>` of the line's `dtmf` + `<Record>`.
+  Only for IVRs with a stable menu. A `fixed` line without valid digits degrades to `none`.
+- `none` — just `<Record>`.
+Lines with no explicit mode inherit the global default, so legacy entries that still carry a
+`dtmf` value run in `auto` unless someone picks `fixed`. In `auto`, when a call ends without
+any instruction detected the thread gets "🎧 IVR did not ask for any key. Heard live: …".
+
+App Home: a global "Tecla del IVR" section with ✏️ Edit (auto/none), a "Modo de tecla" select in
+the line modal (inherit/auto/fixed/none + digits field, validated), and a per-line badge
+(`🎧 Auto` / `🔢 Fijo: ww1` / `🚫 Sin tecla`, with `(default)` when inherited).
+Tests: `npm test` (`tests/ivrKeypress.test.js`, `tests/keypressMode.test.js`).
 
 ### ⚠️ Still known-broken
 **`getLanguage()` forces the wrong language into Whisper.** The IVR's language does not
@@ -149,7 +161,9 @@ Full evidence, call volumes and the testing plan live in the project memory file
 
 ### Number Directory CSV
 - `GET /numbers.csv` exports the full directory with columns:
-  `phone_number, friendly_name, channel_id, routing, sms, voice`
+  `phone_number, friendly_name, channel_id, routing, sms, voice, keypress_mode, dtmf, language`
+- `keypress_mode`: `auto` | `fixed` | `none`, blank = inherit the global default. `dtmf` and
+  `language` round-trip through upload (they used to be dropped on CSV replace).
 - `routing` column: `walkietalkie` (webhooks managed by this app) or `vapi` (hands off)
 - Upload via Slack App Home → "Upload CSV" modal (paste CSV text)
 - Or use `node scripts/configure-from-csv.js numbers.csv` to also update Twilio webhooks
@@ -157,6 +171,7 @@ Full evidence, call volumes and the testing plan live in the project memory file
 ### App Home (Slack)
 - Credentials section — edit Twilio SID + Auth Token
 - Default channel section
+- IVR keypress section — global default mode (auto/none); per-line override in the line modal
 - Sync button — triggers immediate capability re-sync; shows last-synced timestamp
 - Number directory — shows first 10 lines with capabilities + VAPI badge; Download/Upload CSV buttons
 
