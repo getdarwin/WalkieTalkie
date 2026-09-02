@@ -3,17 +3,26 @@
 Node.js/Express service that receives SMS messages and voice calls from ~370 Twilio phone lines and forwards them to Slack. Slack is the entire UI — no web front-end. Primary use case is receiving SMS/voice OTP verification codes across many lines simultaneously.
 
 ## Stack
-- **Runtime**: Node.js 18+
+- **Runtime**: Node.js 20+ — **production runs on Vercel serverless** (`api/index.js` exports the
+  Express app; `src/index.js` is the local long-lived entry point only)
+- **Persistence**: Upstash Redis via `src/services/store.js` (REST API); local dev falls back to
+  JSON files under `data/store/`. Every `data/*.json` mention below maps to a Redis key in prod.
 - **Framework**: Express 4 (mounted on Bolt's ExpressReceiver)
 - **Twilio SDK**: `twilio` (request validation, TwiML, REST API)
 - **Slack SDK**: `@slack/bolt` (App Home, block actions, modals) + `@slack/web-api` (threading)
 - **Scheduler**: `node-cron` (periodic capability re-sync)
-- **Transcription**: `groq-sdk` with `whisper-large-v3-turbo` (optional, multilingual)
+- **Transcription**: `groq-sdk` with `whisper-large-v3-turbo` (optional, multilingual); the same key
+  powers the LLM layer of IVR keypress detection (`qwen/qwen3.8-27b`)
+- **Live IVR listening**: Twilio Real-Time Transcription (`<Start><Transcription>`, Deepgram nova-3,
+  `languageCode="multi"`)
 
 ## Project Structure
 ```
+api/
+  index.js                      # Vercel entry — exports the Express app (vercel.json rewrites everything here)
 src/
-  index.js                      # Entry point, env validation, HTTP routes, CSV export
+  index.js                      # Local entry point (env validation + listen); not used on Vercel
+  app.js                        # Builds the Express app: /health, /logs, /capabilities, /numbers.csv, /cron, routers
   routes/
     twilio.js                   # POST /twilio-webhook (SMS handler)
     voice.js                    # POST /twilio-voice (voice, live IVR keypress + recording handler)
@@ -30,7 +39,10 @@ src/
     logger.js                   # Appends to data/logs.json (last 1000 entries)
     capabilities.js             # Twilio capability sync, cron scheduler, cache
     settings.js                 # data/settings.json with env var fallbacks
-    callThreads.js              # data/call-threads.json — maps CallSid → Slack thread
+    callThreads.js              # data/call-threads.json — maps CallSid → Slack thread (+ keypress state)
+    store.js                    # KV abstraction: Upstash Redis (prod) or data/store/*.json (dev)
+    background.js               # backgroundTask(): waitUntil() so work survives the HTTP response on Vercel
+tests/                          # node:test suites — `npm test`
 config/
   numbers.json                  # Number directory — edit without restart (hot-reload)
 data/                           # Auto-generated, gitignored
@@ -82,7 +94,8 @@ scripts/
 - Numbers not in `config/numbers.json` fall back to raw E.164 display and `SLACK_DEFAULT_CHANNEL`
 
 ### Voice Handling
-- Incoming call → Slack thread notification + silent TwiML `<Record>`
+- Incoming call → Slack thread notification + `<Start><Transcription>` + silent `<Record>` from second zero
+- The IVR is listened to live and the key it asks for is pressed automatically (see next section)
 - On recording callback: download MP3 from Twilio (30s timeout), upload to Slack, transcribe via Groq
 - Transcription is multilingual (Spanish, Portuguese, English)
 - Call threads keyed by `channel:toNumber:YYYY-MM-DD` — one thread per line per day
@@ -199,18 +212,35 @@ node scripts/configure-twilio.js
 node scripts/configure-from-csv.js path/to/numbers.csv
 ```
 
+## Deploy (production)
+```bash
+vercel deploy --prod   # from the working branch — THIS is how prod gets updated
+curl https://walkietalkie-kappa.vercel.app/health
+```
+- Production is the Vercel project `walkietalkie` (alias `walkietalkie-kappa.vercel.app`). Twilio webhooks
+  and Slack request URLs point there.
+- A push to `main` does **not** deploy: work lives on `feat/vercel-serverless-migration` (PR #2 open) and
+  prod is deployed from that branch with the CLI.
+- Production Twilio credentials live in Redis `settings` (set from the Slack App Home). The token in a
+  local `.env` may be stale — do not assume it is valid.
+
 ## Dev Commands
 ```bash
 npm install
 cp .env.example .env   # fill in all values
+npm test               # node:test suites in tests/ (pure modules only, fast)
 npm run dev            # nodemon hot-reload
-npm start              # production
+npm start              # local long-lived server
 
 # Local tunnel (required for Twilio to reach localhost)
 ngrok http 3000        # copy HTTPS URL → WEBHOOK_BASE_URL in .env
 ```
 
 ## Testing
+> Local gotcha: this repo lives under `~/Documents`, which iCloud Drive evicts. When `node_modules`
+> files are "dataless", any `require('express')`/`require('twilio')` blocks for minutes. Fix with
+> `rm -rf node_modules && npm install`. `npm test` only requires pure modules so it is unaffected.
+
 ```bash
 # Check transaction log
 curl "http://localhost:3000/logs" | jq
