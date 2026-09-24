@@ -68,6 +68,7 @@ scripts/
 | `GROQ_API_KEY` | Optional — enables Groq Whisper transcription and the LLM layer of IVR keypress detection |
 | `IVR_KEYPRESS_LLM_MODEL` | Optional — Groq text model for keypress detection (default `qwen/qwen3.8-27b`) |
 | `ADMIN_SECRET` | Optional — protects /logs, /capabilities and /numbers.csv with bearer token auth |
+| `LINES_API_SECRET` | Bearer token for `POST/DELETE /lines` (n8n purchase flow). Required — without it those endpoints answer 503 |
 | `PORT` | Server port (default: 3000) |
 
 ## HTTP Endpoints
@@ -77,6 +78,8 @@ scripts/
 | `GET` | `/logs?limit=N&type=sms\|voice-recording` | Optional ADMIN_SECRET | Transaction log |
 | `GET` | `/capabilities?type=sms\|voice\|mms\|fax` | Optional ADMIN_SECRET | Twilio capabilities cache |
 | `GET` | `/numbers.csv` | Optional ADMIN_SECRET | Full number directory as CSV |
+| `POST` | `/lines` | `LINES_API_SECRET` | Provision a purchased line: save `<Client>[ N] - <Owner>` + connect webhooks |
+| `DELETE` | `/lines/:phone` | `LINES_API_SECRET` | Drop a released line from the directory (idempotent) |
 | `POST` | `/twilio-webhook` | Twilio HMAC | Inbound SMS from all Twilio numbers |
 | `POST` | `/twilio-voice` | Twilio HMAC | Inbound voice call |
 | `POST` | `/twilio-voice/recording` | Twilio HMAC | Recording callback |
@@ -154,6 +157,17 @@ truncates real codes (`9429` instead of `169429`).
 
 Full evidence, call volumes and the testing plan live in the project memory file
 `meta_ivr_keypress.md`.
+
+### Line provisioning API (n8n purchase flow)
+The n8n workflow behind `#solicitud-compra-lineaswhatsapp` (buys/releases Twilio numbers) calls:
+- `POST /lines` `{ phone, client, owner?, channel? }` → saves the line and connects SMS/voice webhooks
+  (same as saving in the App Home; VAPI/Pipecat lines are never touched). Returns `{ ok, phone, name, sms, voice, created }`.
+  Twilio failure → 502 with the entry kept so a retry finishes it.
+- Name = `<Client>[ N] - <Owner>` (`services/lineNaming.js`): the number is added only when the client already
+  has lines (highest existing + 1, case-insensitive, owner ignored). Owner = HubSpot account owner, resolved by n8n.
+  A retry for a number already in the directory keeps its name.
+- `DELETE /lines/:phone` → removes it from the directory (called before the number is released).
+- Auth: `Authorization: Bearer <LINES_API_SECRET>`, fails closed. Tests: `tests/lineNaming.test.js`, `tests/linesRoute.test.js`.
 
 ### Slack Threading
 - Threads are keyed by `channel:toNumber:YYYY-MM-DD` — one thread per line per day

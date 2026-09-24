@@ -1,6 +1,7 @@
 const { receiver, boltApp } = require('./bolt/app');
 const twilioRouter = require('./routes/twilio');
 const voiceRouter = require('./routes/voice');
+const linesRouter = require('./routes/lines');
 const { loadLogs } = require('./services/logger');
 const { getCapabilities, syncIfStale, syncAllCapabilities } = require('./services/capabilities');
 const { loadConfig } = require('./services/numbers');
@@ -120,6 +121,9 @@ app.get('/cron/sync-capabilities', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// Line provisioning API for the n8n purchase flow (bearer LINES_API_SECRET, fails closed)
+app.use('/lines', linesRouter);
 
 // Twilio webhooks
 app.use('/twilio-webhook', twilioRouter);
