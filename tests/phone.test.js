@@ -35,3 +35,30 @@ test('isSipUri', () => {
   assert.strictEqual(isSipUri('+5255'), false);
   assert.strictEqual(isSipUri(undefined), false);
 });
+
+const { resolveCallParties } = require('../src/services/phone');
+
+test('resolveCallParties: llamada SIP normaliza To y From y avisa que es SIP', () => {
+  const r = resolveCallParties({
+    To: 'sip:525512345678@darwin-zadarma.sip.twilio.com',
+    From: 'sip:+15551234567@sip.zadarma.com',
+  });
+  assert.deepStrictEqual(r, { to: '+525512345678', from: '+15551234567', sip: true });
+});
+
+test('resolveCallParties: llamada PSTN de Twilio queda igual', () => {
+  const r = resolveCallParties({ To: '+12025550101', From: '+15551234567' });
+  assert.deepStrictEqual(r, { to: '+12025550101', from: '+15551234567', sip: false });
+});
+
+test('resolveCallParties: From anónimo/no numérico se conserva tal cual (no se pierde info)', () => {
+  const r = resolveCallParties({ To: '+12025550101', From: 'anonymous' });
+  assert.strictEqual(r.from, 'anonymous');
+  const s = resolveCallParties({ To: 'sip:525512345678@x.sip.twilio.com', From: 'sip:anonymous@anonymous.invalid' });
+  assert.strictEqual(s.from, 'sip:anonymous@anonymous.invalid');
+});
+
+test('resolveCallParties: To no numérico se conserva (el handler responde con TwiML vacío)', () => {
+  assert.strictEqual(resolveCallParties({ To: 'weird', From: '+1555123456' }).to, 'weird');
+  assert.strictEqual(resolveCallParties({}).to, '');
+});

@@ -27,4 +27,22 @@ function normalizeE164(raw) {
   return E164.test(phone) ? phone : '';
 }
 
-module.exports = { normalizeE164, isSipUri };
+/**
+ * To/From de un webhook de voz de Twilio, normalizados a E.164. Las llamadas que
+ * entran por SIP (Zadarma → Twilio SIP Domain) traen `sip:...@host`. Si el valor
+ * no se puede normalizar (p. ej. un From anónimo) se conserva tal cual.
+ *
+ * @param {{ To?: string, From?: string }} body
+ * @returns {{ to: string, from: string, sip: boolean }}
+ */
+function resolveCallParties(body = {}) {
+  const rawTo = String(body.To ?? '');
+  const rawFrom = String(body.From ?? '');
+  return {
+    to: normalizeE164(rawTo) || rawTo,
+    from: normalizeE164(rawFrom) || rawFrom,
+    sip: isSipUri(rawTo) || isSipUri(rawFrom),
+  };
+}
+
+module.exports = { normalizeE164, isSipUri, resolveCallParties };
