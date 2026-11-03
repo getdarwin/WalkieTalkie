@@ -1,37 +1,39 @@
 const { WebClient } = require('@slack/web-api');
-const fs = require('fs');
-const path = require('path');
+const store = require('./store');
 
 const client = new WebClient(process.env.SLACK_BOT_TOKEN);
 
-// Persists thread timestamps so the server can resume threads after restart.
-// Key format: "<channelId>:<toNumber>:<YYYY-MM-DD>"
-// A new top-level thread is created each day per line, keeping threads short.
-const THREADS_PATH = path.join(__dirname, '../../data/threads.json');
+// Persists thread timestamps so threads survive across serverless invocations
+// and restarts. Key format: "thread:<channelId>:<toNumber>:<YYYY-MM-DD>"
+// A new top-level thread is created each day per line; entries expire after
+// 2 days since they're only relevant for the current day.
+const THREAD_TTL_SECONDS = 2 * 24 * 60 * 60;
 
 // ─── Thread store ─────────────────────────────────────────────────────────────
-
-function loadThreads() {
-  try {
-    if (!fs.existsSync(THREADS_PATH)) return {};
-    return JSON.parse(fs.readFileSync(THREADS_PATH, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-function saveThreads(threads) {
-  const dir = path.dirname(THREADS_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(THREADS_PATH, JSON.stringify(threads, null, 2));
-}
 
 function todayKey() {
   return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
 }
 
 function threadKey(channel, toNumber) {
-  return `${channel}:${toNumber}:${todayKey()}`;
+  return `thread:${channel}:${toNumber}:${todayKey()}`;
+}
+
+async function getThreadTs(key) {
+  try {
+    return await store.getJSON(key);
+  } catch (err) {
+    console.error('[slack] Failed to read thread store:', err.message);
+    return null;
+  }
+}
+
+async function saveThreadTs(key, ts) {
+  try {
+    await store.setJSON(key, ts, THREAD_TTL_SECONDS);
+  } catch (err) {
+    console.error('[slack] Failed to persist thread ts:', err.message);
+  }
 }
 
 // ─── OTP detection ────────────────────────────────────────────────────────────
@@ -159,13 +161,12 @@ function buildMessageBlocks(fromNumber, body, otp) {
  * @param {string} opts.body          SMS body text
  */
 async function sendToSlack({ channel, friendlyName, toNumber, fromNumber, body }) {
-  const threads = loadThreads();
   const key = threadKey(channel, toNumber);
   const otp = parseOtp(body);
   const messageBlocks = buildMessageBlocks(fromNumber, body, otp);
   const fallbackText = `SMS to ${friendlyName} from ${fromNumber}: ${body}`;
 
-  let threadTs = threads[key];
+  let threadTs = await getThreadTs(key);
 
   if (!threadTs) {
     // Open a new day-thread with a header message
@@ -176,8 +177,7 @@ async function sendToSlack({ channel, friendlyName, toNumber, fromNumber, body }
     });
 
     threadTs = headerResult.ts;
-    threads[key] = threadTs;
-    saveThreads(threads);
+    await saveThreadTs(key, threadTs);
   }
 
   // Post the SMS as a reply in the thread
@@ -283,12 +283,11 @@ async function postToThread(channel, threadTs, blocks, text, broadcast = false) 
  * @returns {Promise<string>} threadTs of the shared thread
  */
 async function sendCallStartToSlack({ channel, friendlyName, toNumber, fromNumber }) {
-  const threads = loadThreads();
   const key = threadKey(channel, toNumber);
   const blocks = buildCallStartBlocks(fromNumber);
   const fallbackText = `📞 Incoming call to ${friendlyName} from ${fromNumber}`;
 
-  let threadTs = threads[key];
+  let threadTs = await getThreadTs(key);
 
   if (!threadTs) {
     const headerResult = await client.chat.postMessage({
@@ -297,8 +296,7 @@ async function sendCallStartToSlack({ channel, friendlyName, toNumber, fromNumbe
       text: `Thread for ${friendlyName} — ${todayKey()}`,
     });
     threadTs = headerResult.ts;
-    threads[key] = threadTs;
-    saveThreads(threads);
+    await saveThreadTs(key, threadTs);
   }
 
   await client.chat.postMessage({
