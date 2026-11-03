@@ -2,7 +2,8 @@
 // purchase flow). No I/O here so they can be unit-tested with node:test.
 
 const MAX_FIELD_LENGTH = 80;
-const { normalizeE164 } = require('./phone');
+// /lines valida con la versión estricta: '' cuando no es un E.164 válido.
+const { parseE164: normalizeE164 } = require('./phone');
 
 /** Trims, strips control characters and collapses whitespace. */
 function cleanText(value) {

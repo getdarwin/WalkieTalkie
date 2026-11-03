@@ -1,6 +1,6 @@
 const express = require('express');
 const { createZadarmaValidate } = require('../middleware/zadarmaValidate');
-const { normalizeE164 } = require('../services/phone');
+const { parseE164 } = require('../services/phone');
 
 // POST|GET /zadarma-webhook — webhooks nativos de Zadarma. Hoy solo se procesa `SMS`.
 // Ver docs/ZADARMA.md §3. Responde siempre 200 rápido: el trabajo va en background.
@@ -18,14 +18,14 @@ function parseSms(result) {
   }
   if (!data || typeof data !== 'object') return { error: 'result no es un objeto' };
 
-  const to = normalizeE164(data.caller_did);
+  const to = parseE164(data.caller_did);
   if (!to) return { error: 'caller_did inválido' };
   const rawFrom = String(data.caller_id ?? '');
   return {
     sms: {
       to,
       // Los remitentes alfanuméricos ("FACEBOOK") no son números: se conservan tal cual.
-      from: normalizeE164(rawFrom) || rawFrom,
+      from: parseE164(rawFrom) || rawFrom,
       body: typeof data.text === 'string' ? data.text : '',
       provider: 'zadarma',
     },
