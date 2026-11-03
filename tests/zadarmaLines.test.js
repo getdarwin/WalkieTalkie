@@ -101,3 +101,13 @@ test('planImport: un número del directorio con otro provider no se pisa', () =>
   const plan = planImport([{ number: '528718430130', sip: '113056' }], { '+528718430130': 'Línea Twilio' }, DOMAIN);
   assert.equal(plan[0].action, 'skip-other-provider');
 });
+
+const { describeConnectResult } = require('../src/services/zadarmaLines');
+
+test('describeConnectResult: texto para Slack sin exponer credenciales', () => {
+  assert.match(describeConnectResult({ phone: '+528718430130', voice: true, sipChanged: true, sipUri: '528718430130@darwin-zadarma.sip.twilio.com', sms: { ok: true } }),
+    /Voz vía SIP.*528718430130@darwin-zadarma\.sip\.twilio\.com.*SMS activo/s);
+  assert.match(describeConnectResult({ phone: '+1', voice: true, sipChanged: false, sipUri: 'x@y', sms: { ok: false, error: 'SMS not supported' } }),
+    /ya apuntaba.*SMS no disponible: SMS not supported/s);
+  assert.match(describeConnectResult({ phone: '+1', voice: false, skipped: 'routing externo (vapi)' }), /no se tocó.*routing externo \(vapi\)/s);
+});

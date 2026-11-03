@@ -41,9 +41,11 @@ function defaultDeps() {
  * soporte de SMS no es un error: la voz queda conectada y el SMS se reporta.
  *
  * @param {string} phone  E.164
+ * @param {object} [deps]
+ * @param {{ dryRun?: boolean }} [opts]  dryRun: solo lecturas, no escribe nada
  * @returns {Promise<{ phone: string, sipUri?: string, voice: boolean, sipChanged?: boolean, sms?: {ok: boolean, error?: string}, skipped?: string }>}
  */
-async function connectZadarmaLine(phone, deps = defaultDeps()) {
+async function connectZadarmaLine(phone, deps = defaultDeps(), { dryRun = false } = {}) {
   const { client, loadConfig, domain = sipDomain() } = deps;
   const { numbers } = await loadConfig();
   const entry = numbers[phone];
@@ -61,6 +63,7 @@ async function connectZadarmaLine(phone, deps = defaultDeps()) {
 
   const sipUri = buildSipUri(phone, domain);
   const sipChanged = !pointsAtUs(current.sip, sipUri);
+  if (dryRun) return { phone, sipUri, voice: true, sipChanged, sms: { ok: true }, dryRun: true };
   if (sipChanged) await client.setSipUri(phone, sipUri);
 
   let sms;
@@ -94,4 +97,14 @@ function planImport(zadarmaNumbers, directory, domain = sipDomain()) {
     });
 }
 
-module.exports = { DEFAULT_SIP_DOMAIN, sipDomain, buildSipUri, isForeignSip, connectZadarmaLine, planImport };
+/** Resumen en español de `connectZadarmaLine` para Slack. */
+function describeConnectResult(r) {
+  if (r.skipped) return `${r.phone} no se tocó (${r.skipped}).`;
+  const voice = r.sipChanged
+    ? `Voz vía SIP → ${r.sipUri}`
+    : `Voz vía SIP (ya apuntaba a ${r.sipUri})`;
+  const sms = r.sms && r.sms.ok ? 'SMS activo' : `SMS no disponible: ${(r.sms && r.sms.error) || 'desconocido'}`;
+  return `${voice} · ${sms}`;
+}
+
+module.exports = { DEFAULT_SIP_DOMAIN, describeConnectResult, sipDomain, buildSipUri, isForeignSip, connectZadarmaLine, planImport };

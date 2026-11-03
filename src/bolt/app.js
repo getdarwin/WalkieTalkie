@@ -2,6 +2,7 @@ const { App, ExpressReceiver } = require('@slack/bolt');
 const store = require('../services/store');
 const { backgroundTask } = require('../services/background');
 const { setSetting, getSetting } = require('../services/settings');
+const { connectZadarmaLine, describeConnectResult } = require('../services/zadarmaLines');
 const { setNumber, removeNumber, loadConfig, replaceAllNumbers, getGlobalKeypressMode } = require('../services/numbers');
 const { isKeypressMode, sanitizeDtmf } = require('../services/ivrKeypress');
 const { normalizeProvider, isZadarmaEntry } = require('../services/provider');
@@ -9,6 +10,7 @@ const { syncAllCapabilities, connectNumberToWalkieTalkie } = require('../service
 const {
   buildAppHomeView,
   buildCredentialsModal,
+  buildZadarmaCredentialsModal,
   buildDefaultChannelModal,
   buildNumberModal,
   buildCsvUploadModal,
@@ -157,6 +159,16 @@ boltApp.action('action_edit_credentials', async ({ ack, client, body }) => {
   }
 });
 
+boltApp.action('action_edit_zadarma_credentials', async ({ ack, client, body }) => {
+  await ack();
+  if (await denyIfNotAdmin(client, body)) return;
+  try {
+    await client.views.open({ trigger_id: body.trigger_id, view: await buildZadarmaCredentialsModal() });
+  } catch (err) {
+    console.error('[bolt] Failed to open Zadarma credentials modal:', err.message);
+  }
+});
+
 boltApp.action('action_edit_default_channel', async ({ ack, client, body }) => {
   await ack();
   if (await denyIfNotAdmin(client, body)) return;
@@ -274,6 +286,21 @@ boltApp.action(/^action_number_menu__/, async ({ ack, client, body, action }) =>
     const routing = (entry && typeof entry === 'object' && entry.routing) || 'walkietalkie';
     const isExternal = EXTERNAL_ROUTING_PROVIDERS.has(routing.toLowerCase());
 
+    if (op === 'connect' && isZadarmaEntry(entry)) {
+      try {
+        const result = await connectZadarmaLine(phone);
+        await publishAppHome(client, body.user.id, {
+          statusText: `:white_check_mark: *${name || phone}* — ${describeConnectResult(result)}`,
+        });
+      } catch (err) {
+        console.error(`[bolt] Failed to connect Zadarma line ${phone}:`, err.message);
+        await publishAppHome(client, body.user.id, {
+          statusText: `:x: No se pudo conectar *${name || phone}*: ${err.message}`,
+        });
+      }
+      return;
+    }
+
     if (op === 'connect') {
       try {
         const caps = await connectNumberToWalkieTalkie(phone);
@@ -356,6 +383,19 @@ boltApp.view('modal_credentials', async ({ ack, view, client, body }) => {
   await publishAppHome(client, body.user.id, { statusText: ':white_check_mark: Credenciales de Twilio actualizadas.' });
 });
 
+boltApp.view('modal_zadarma_credentials', async ({ ack, view, client, body }) => {
+  await ack();
+  if (await denyIfNotAdmin(client, body)) return;
+  const values = view.state.values;
+  const apiKey = values.block_zadarma_key.input_zadarma_key.value?.trim();
+  const apiSecret = values.block_zadarma_secret.input_zadarma_secret.value?.trim();
+
+  if (apiKey) await setSetting('zadarma.apiKey', apiKey);
+  if (apiSecret) await setSetting('zadarma.apiSecret', apiSecret);
+
+  await publishAppHome(client, body.user.id, { statusText: ':white_check_mark: Credenciales de Zadarma actualizadas.' });
+});
+
 boltApp.view('modal_default_channel', async ({ ack, view, client, body }) => {
   await ack();
   if (await denyIfNotAdmin(client, body)) return;
@@ -373,6 +413,7 @@ boltApp.view('modal_number', async ({ ack, view, client, body }) => {
   const language = values.block_language?.input_language?.selected_option?.value || '';
   const selectedMode = values.block_keypress_mode?.input_keypress_mode?.selected_option?.value || 'inherit';
   const keypressMode = isKeypressMode(selectedMode) ? selectedMode : '';
+  const provider = normalizeProvider(values.block_provider?.input_provider?.selected_option?.value);
 
   const errors = {};
   if (!E164_RE.test(phone)) {
@@ -396,9 +437,9 @@ boltApp.view('modal_number', async ({ ack, view, client, body }) => {
   const existingEntry = existingNumbers[phone];
   const existingRouting = (existingEntry && typeof existingEntry === 'object' && existingEntry.routing) || '';
   const isExternal = EXTERNAL_ROUTING_PROVIDERS.has(existingRouting.toLowerCase());
-  const isZadarma = isZadarmaEntry(existingEntry);
+  const isZadarma = provider === 'zadarma';
 
-  await setNumber(phone, { name, channel, dtmf, language, keypressMode });
+  await setNumber(phone, { name, channel, dtmf, language, keypressMode, provider });
 
   let notifText = `✓ ${phone}${name ? ` (${name})` : ''} guardado.`;
 

@@ -2,6 +2,7 @@ const { getSetting } = require('../services/settings');
 const { loadConfig, getGlobalKeypressMode } = require('../services/numbers');
 const { getCapabilities } = require('../services/capabilities');
 const { resolveKeypressMode } = require('../services/ivrKeypress');
+const { entryProvider } = require('../services/provider');
 
 // ─── Keypress mode labels ─────────────────────────────────────────────────────
 
@@ -40,14 +41,17 @@ function relativeTime(isoString) {
  * Called on every home_opened event and after any config change.
  */
 async function buildAppHomeView({ statusText = null } = {}) {
-  const [accountSidRaw, authTokenRaw, defaultChannelRaw, config, caps, globalKeypressMode] = await Promise.all([
+  const [accountSidRaw, authTokenRaw, defaultChannelRaw, config, caps, globalKeypressMode, zadarmaKey, zadarmaSecret] = await Promise.all([
     getSetting('twilio.accountSid'),
     getSetting('twilio.authToken'),
     getSetting('slack.defaultChannel'),
     loadConfig(),
     getCapabilities(),
     getGlobalKeypressMode(),
+    getSetting('zadarma.apiKey'),
+    getSetting('zadarma.apiSecret'),
   ]);
+  const zadarmaStatus = zadarmaKey && zadarmaSecret ? '✅ Configured' : '⚠️ Not configured (needed to connect Zadarma lines)';
   const accountSid = accountSidRaw || '';
   const authToken = authTokenRaw || '';
   const defaultChannel = defaultChannelRaw || '';
@@ -103,6 +107,15 @@ async function buildAppHomeView({ statusText = null } = {}) {
         type: 'button',
         text: { type: 'plain_text', text: '✏️ Edit', emoji: true },
         action_id: 'action_edit_credentials',
+      },
+    },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*Zadarma Credentials*\n${zadarmaStatus}` },
+      accessory: {
+        type: 'button',
+        text: { type: 'plain_text', text: '✏️ Edit', emoji: true },
+        action_id: 'action_edit_zadarma_credentials',
       },
     },
     { type: 'divider' },
@@ -172,7 +185,7 @@ async function buildAppHomeView({ statusText = null } = {}) {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `Download the CSV, edit names and channels in any spreadsheet app, then paste the contents back using *Upload CSV*.\n\nCSV columns: \`phone_number\`, \`friendly_name\`, \`channel_id\`, \`routing\` (\`walkietalkie\` or \`vapi\`), \`sms\`, \`voice\`, \`keypress_mode\` (\`auto\`, \`fixed\`, \`none\` or blank = default), \`dtmf\`, \`language\``,
+        text: `Download the CSV, edit names and channels in any spreadsheet app, then paste the contents back using *Upload CSV*.\n\nCSV columns: \`phone_number\`, \`friendly_name\`, \`channel_id\`, \`routing\` (\`walkietalkie\` or \`vapi\`), \`sms\`, \`voice\`, \`keypress_mode\` (\`auto\`, \`fixed\`, \`none\` or blank = default), \`dtmf\`, \`language\`, \`provider\` (\`twilio\` o \`zadarma\`; vacío = twilio)`,
       },
     },
     {
@@ -219,15 +232,18 @@ async function buildAppHomeView({ statusText = null } = {}) {
       const channel = typeof entry === 'object' ? entry.channel : null;
       const routing = (entry && typeof entry === 'object' && entry.routing) || 'walkietalkie';
       const isExternal = ['vapi', 'talkyto', 'pipecat'].includes(routing.toLowerCase());
+      const isZadarma = entryProvider(entry) === 'zadarma';
       const channelDisplay = channel ? `<#${channel}>` : (defaultChannel ? `<#${defaultChannel}> _(default)_` : '_no channel_');
       const cap = caps.numbers[phone];
-      const capBadges = cap
+      const capBadges = isZadarma
+        ? 'Voz vía SIP'
+        : cap
         ? [cap.capabilities.sms ? 'SMS' : null, cap.capabilities.voice ? 'VOICE' : null].filter(Boolean).join(' · ') || 'no caps'
         : '_not scanned_';
-      const routingBadge = isExternal ? `  \`${routing.toUpperCase()}\`` : '';
+      const routingBadge = (isExternal ? `  \`${routing.toUpperCase()}\`` : '') + (isZadarma ? '  `ZADARMA`' : '');
       const smsConn = cap?.smsUrl && baseUrl && cap.smsUrl.startsWith(baseUrl);
       const voiceConn = cap?.voiceUrl && baseUrl && cap.voiceUrl.startsWith(baseUrl);
-      const connBadge = !cap || !baseUrl || isExternal
+      const connBadge = isZadarma || !cap || !baseUrl || isExternal
         ? ''
         : (smsConn || voiceConn) ? '  🟢' : '  🔴';
       const keyBadge = isExternal ? '' : `  |  ${keypressBadge(entry, globalKeypressMode)}`;
@@ -261,6 +277,44 @@ async function buildAppHomeView({ statusText = null } = {}) {
 }
 
 // ─── Modal builders ───────────────────────────────────────────────────────────
+
+async function buildZadarmaCredentialsModal() {
+  const hasCredentials = !!(await getSetting('zadarma.apiKey')) && !!(await getSetting('zadarma.apiSecret'));
+
+  return {
+    type: 'modal',
+    callback_id: 'modal_zadarma_credentials',
+    title: { type: 'plain_text', text: 'Zadarma Credentials' },
+    submit: { type: 'plain_text', text: 'Save' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: hasCredentials
+            ? 'Credentials are already configured. For security they are never displayed. Fill in a field only to replace it — leave blank to keep the current value.'
+            : 'Generate them at *my.zadarma.com → Settings → Integrations and API → API keys*. The secret also signs Zadarma webhooks: never share it.',
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'block_zadarma_key',
+        optional: true,
+        label: { type: 'plain_text', text: 'API Key' },
+        element: { type: 'plain_text_input', action_id: 'input_zadarma_key', max_length: 200 },
+      },
+      {
+        type: 'input',
+        block_id: 'block_zadarma_secret',
+        optional: true,
+        label: { type: 'plain_text', text: 'API Secret' },
+        hint: { type: 'plain_text', text: 'Stored on the server, never shown again.' },
+        element: { type: 'plain_text_input', action_id: 'input_zadarma_secret', max_length: 200 },
+      },
+    ],
+  };
+}
 
 async function buildCredentialsModal() {
   const hasCredentials = !!(await getSetting('twilio.accountSid')) && !!(await getSetting('twilio.authToken'));
@@ -355,6 +409,11 @@ function buildNumberModal(phone = '', entry = null, globalKeypressMode = 'auto')
   const dtmf = entry && typeof entry === 'object' ? entry.dtmf || '' : '';
   const language = entry && typeof entry === 'object' ? entry.language || '' : '';
   const keypressMode = entry && typeof entry === 'object' ? entry.keypressMode || '' : '';
+  const provider = entryProvider(entry);
+  const providerOptions = [
+    { text: { type: 'plain_text', text: 'Twilio', emoji: true }, value: 'twilio' },
+    { text: { type: 'plain_text', text: 'Zadarma (voz vía SIP)', emoji: true }, value: 'zadarma' },
+  ];
 
   const inheritOption = {
     text: { type: 'plain_text', text: `↩️ Usar default global (${KEYPRESS_MODE_LABELS[globalKeypressMode].split(' — ')[0]})`, emoji: true },
@@ -406,6 +465,18 @@ function buildNumberModal(phone = '', entry = null, globalKeypressMode = 'auto')
           action_id: 'input_channel',
           ...(channel ? { initial_channel: channel } : {}),
           placeholder: { type: 'plain_text', text: 'Select a channel (optional)' },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'block_provider',
+        label: { type: 'plain_text', text: 'Proveedor' },
+        hint: { type: 'plain_text', text: 'Twilio: se conecta solo al guardar. Zadarma: guarda y luego usa «🔗 Conectar a WalkieTalkie» (apunta el SIP URI y activa SMS).' },
+        element: {
+          type: 'static_select',
+          action_id: 'input_provider',
+          options: providerOptions,
+          initial_option: providerOptions.find((o) => o.value === provider),
         },
       },
       {
@@ -764,6 +835,7 @@ module.exports = {
   buildKeypressModeModal,
   buildAppHomeView,
   buildCredentialsModal,
+  buildZadarmaCredentialsModal,
   buildDefaultChannelModal,
   buildNumberModal,
   buildCsvUploadModal,
