@@ -359,6 +359,26 @@ Changes take effect immediately — no restart needed.
 
 ---
 
+## Zadarma Lines
+
+Besides Twilio, lines can be provided by **Zadarma**: set `provider: zadarma` on the line (App Home, CSV column
+`provider`, `config/numbers.json` or `POST /lines`). Voice reaches WalkieTalkie through a Twilio SIP Domain (Zadarma →
+External Server SIP URI → `/twilio-voice`), so live IVR keypress, recording and transcription work exactly like on a
+Twilio line. SMS arrive through Zadarma's webhook at `/zadarma-webhook`.
+
+New variables: `ZADARMA_API_KEY`, `ZADARMA_API_SECRET`, `ZADARMA_TWILIO_SIP_DOMAIN`, `ZADARMA_STRICT_SIGNATURE`
+(see `.env.example`).
+
+```bash
+node scripts/configure-zadarma.js --dry-run   # preview, changes nothing
+node scripts/configure-zadarma.js             # SMS webhook + SIP URI + receive_sms per Zadarma line
+```
+
+📖 Step-by-step runbook (for people without code access): [`docs/ZADARMA_SETUP.md`](docs/ZADARMA_SETUP.md) ·
+technical reference: [`docs/ZADARMA.md`](docs/ZADARMA.md).
+
+---
+
 ## Slack App Permissions Summary
 
 | Permission | Required for |
@@ -380,7 +400,8 @@ Events: `app_home_opened`
 | `GET` | `/capabilities` | Optional `ADMIN_SECRET` | Twilio capability cache |
 | `GET` | `/numbers.csv` | None | Number directory as CSV |
 | `POST` | `/twilio-webhook` | Twilio HMAC | Inbound SMS |
-| `POST` | `/twilio-voice` | Twilio HMAC | Inbound voice call |
+| `POST` | `/twilio-voice` | Twilio HMAC | Inbound voice call (also Zadarma calls arriving over SIP) |
+| `GET`/`POST` | `/zadarma-webhook` | Zadarma `Signature` | Inbound Zadarma SMS + `zd_echo` URL verification |
 | `POST` | `/slack/events` | Slack signing secret | Slack events + interactions |
 
 For protected endpoints, pass the secret as:

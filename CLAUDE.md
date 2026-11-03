@@ -25,10 +25,12 @@ src/
   app.js                        # Builds the Express app: /health, /logs, /capabilities, /numbers.csv, /cron, routers
   routes/
     twilio.js                   # POST /twilio-webhook (SMS handler)
+    zadarma.js                  # GET|POST /zadarma-webhook (Zadarma SMS + zd_echo)
     voice.js                    # POST /twilio-voice (voice, live IVR keypress + recording handler)
   middleware/
     twilioValidate.js           # HMAC-SHA1 Twilio signature check (uses req.originalUrl)
     adminAuth.js                # Optional ADMIN_SECRET check for /logs, /capabilities + /numbers.csv
+    zadarmaValidate.js          # Zadarma `Signature` check (raw/hex base64 HMAC-SHA1, ZADARMA_STRICT_SIGNATURE)
   bolt/
     app.js                      # Slack Bolt app — App Home, block actions, modals
     views.js                    # Block Kit builders: App Home, all modals
@@ -42,6 +44,12 @@ src/
     callThreads.js              # data/call-threads.json — maps CallSid → Slack thread (+ keypress state)
     store.js                    # KV abstraction: Upstash Redis (prod) or data/store/*.json (dev)
     background.js               # backgroundTask(): waitUntil() so work survives the HTTP response on Vercel
+    phone.js                    # normalizeE164 (accepts SIP URIs), parseE164 (strict), resolveCallParties
+    provider.js                 # Line provider helpers: "twilio" (default, not persisted) | "zadarma"
+    inboundSms.js               # handleInboundSms(): shared SMS flow for Twilio + Zadarma
+    zadarma.js                  # Zadarma REST client (native fetch, HMAC-SHA1 signature)
+    zadarmaLines.js             # connectZadarmaLine(): SIP URI + receive_sms (idempotent), planImport()
+    zadarmaProvision.js         # runProvision(): webhook + lines (used by scripts/configure-zadarma.js)
 tests/                          # node:test suites — `npm test`
 config/
   numbers.json                  # Number directory — edit without restart (hot-reload)
@@ -53,7 +61,11 @@ data/                           # Auto-generated, gitignored
   call-threads.json             # Active call → Slack thread mapping (max 500)
 scripts/
   configure-twilio.js           # One-time + re-run: sets webhook URLs on all numbers
-  configure-from-csv.js         # Bulk-configure from CSV; handles routing column
+  configure-from-csv.js         # Bulk-configure from CSV; handles routing + provider columns
+  configure-zadarma.js          # Zadarma: SMS webhook + SIP URI + receive_sms per line (--dry-run, --import)
+docs/
+  ZADARMA.md                    # Technical reference (API, signatures, formats, repo state)
+  ZADARMA_SETUP.md              # Step-by-step runbook for people without code access
 ```
 
 ## Environment Variables (.env)
@@ -69,6 +81,9 @@ scripts/
 | `IVR_KEYPRESS_LLM_MODEL` | Optional — Groq text model for keypress detection (default `qwen/qwen3.8-27b`) |
 | `ADMIN_SECRET` | Optional — protects /logs, /capabilities and /numbers.csv with bearer token auth |
 | `LINES_API_SECRET` | Bearer token for `POST/DELETE /lines` (n8n purchase flow). Required — without it those endpoints answer 503 |
+| `ZADARMA_API_KEY` / `ZADARMA_API_SECRET` | Optional — Zadarma API credentials (also editable from the App Home). The secret also signs Zadarma webhooks |
+| `ZADARMA_TWILIO_SIP_DOMAIN` | Twilio SIP Domain Zadarma numbers forward to (default `darwin-zadarma.sip.twilio.com`) |
+| `ZADARMA_STRICT_SIGNATURE` | Default `true`: reject `/zadarma-webhook` with an invalid signature. `false` only logs (first live SMS test) |
 | `PORT` | Server port (default: 3000) |
 
 ## HTTP Endpoints
@@ -81,7 +96,8 @@ scripts/
 | `POST` | `/lines` | `LINES_API_SECRET` | Provision a purchased line: save `<Client>[ N] - <Owner>` + connect webhooks |
 | `DELETE` | `/lines/:phone` | `LINES_API_SECRET` | Drop a released line from the directory (idempotent) |
 | `POST` | `/twilio-webhook` | Twilio HMAC | Inbound SMS from all Twilio numbers |
-| `POST` | `/twilio-voice` | Twilio HMAC | Inbound voice call |
+| `POST` | `/twilio-voice` | Twilio HMAC | Inbound voice call (also Zadarma calls arriving over SIP) |
+| `GET`/`POST` | `/zadarma-webhook` | Zadarma `Signature` | Zadarma SMS (`event=SMS`) + `zd_echo` URL verification |
 | `POST` | `/twilio-voice/recording` | Twilio HMAC | Recording callback |
 | `POST` | `/twilio-voice/ended` | Twilio HMAC | `<Record>` action callback (resolves silent calls) |
 | `POST` | `/twilio-voice/transcription` | Twilio HMAC | Real-Time Transcription callback (live IVR keypress) |
@@ -195,15 +211,36 @@ The n8n workflow behind `#solicitud-compra-lineaswhatsapp` (buys/releases Twilio
 
 ### Number Directory CSV
 - `GET /numbers.csv` exports the full directory with columns:
-  `phone_number, friendly_name, channel_id, routing, sms, voice, keypress_mode, dtmf, language`
+  `phone_number, friendly_name, channel_id, routing, sms, voice, keypress_mode, dtmf, language, provider`
+- `provider`: `twilio` (default) | `zadarma`. Zadarma lines are never queried/configured in Twilio
 - `keypress_mode`: `auto` | `fixed` | `none`, blank = inherit the global default. `dtmf` and
   `language` round-trip through upload (they used to be dropped on CSV replace).
 - `routing` column: `walkietalkie` (webhooks managed by this app) or `vapi` (hands off)
 - Upload via Slack App Home → "Upload CSV" modal (paste CSV text)
 - Or use `node scripts/configure-from-csv.js numbers.csv` to also update Twilio webhooks
 
+### Zadarma lines (`provider: "zadarma"`)
+Full runbook: [`docs/ZADARMA_SETUP.md`](docs/ZADARMA_SETUP.md). Technical reference: [`docs/ZADARMA.md`](docs/ZADARMA.md).
+- **Voice** goes Zadarma → External Server (SIP URI `<num sin +>@darwin-zadarma.sip.twilio.com`) → Twilio SIP Domain →
+  the **same** `POST /twilio-voice`, so live IVR keypress, recording and transcription work unchanged. `To`/`From` arrive
+  as SIP URIs (`sip:528718430130@…`); `voice.js` normalizes them to E.164 first and stores `provider: 'zadarma'` in the
+  call thread. The raw body is logged (`SIP call raw body`) while the exact format is unconfirmed.
+- **SMS** arrives at `POST /zadarma-webhook` (event `SMS`, `result` is a JSON string) and runs through
+  `handleInboundSms()` — same flow as Twilio, log entries tagged `provider: 'zadarma'`.
+  `ZADARMA_STRICT_SIGNATURE=false` only for the first live test (SMS signature format is unconfirmed).
+- Zadarma lines are excluded from the Twilio capability sync; `checkAndCacheCapabilities`/`connectNumberToWalkieTalkie`
+  skip them. The App Home shows a `ZADARMA` badge and "Voz vía SIP".
+- Connect a line: App Home → ⋯ → 🔗 Conectar a WalkieTalkie, `POST /lines` with `provider:"zadarma"`, or
+  `node scripts/configure-zadarma.js [--dry-run] [--import]`. All three call `connectZadarmaLine()`
+  (SIP URI + `receive_sms`, idempotent). Lines with external `routing` (vapi/…) are never touched.
+- **Setup Zadarma (manual, one-time):** Twilio SIP Domain `darwin-zadarma.sip.twilio.com` with the IP ACL `zadarma`
+  (12 Zadarma IPs /32) and "A call comes in" → `POST {WEBHOOK_BASE_URL}/twilio-voice`; then set the `ZADARMA_*`
+  variables and run `node scripts/configure-zadarma.js`. Already done for the Darwin AI account (2026-11-03).
+- Tests: `tests/phone.test.js`, `voiceSip.test.js`, `provider.test.js`, `inboundSms.test.js`, `zadarmaClient.test.js`,
+  `zadarmaValidate.test.js`, `zadarmaRoute.test.js`, `zadarmaLines.test.js`, `zadarmaProvision.test.js`, `appHomeZadarma.test.js`.
+
 ### App Home (Slack)
-- Credentials section — edit Twilio SID + Auth Token
+- Credentials sections — edit Twilio SID + Auth Token, and Zadarma API key + secret (never displayed)
 - Default channel section
 - IVR keypress section — global default mode (auto/none); per-line override in the line modal
 - Sync button — triggers immediate capability re-sync; shows last-synced timestamp

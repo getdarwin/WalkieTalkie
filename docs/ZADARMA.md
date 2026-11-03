@@ -96,13 +96,53 @@ result={"caller_id":"+15551234567","caller_did":"+525512345678","text":"Tu códi
 
 ---
 
-## 5. Estado actual del repo (lo relevante)
+## 5. Infraestructura YA configurada (2026-11-03)
 
-- **Rama base: `feat/vercel-serverless-migration`.** `main` solo tiene docs y config. El código (`src/`, `api/`, `tests/`) vive en esa rama.
-- Deploy en Vercel (`api/index.js` y `vercel.json`, con rewrite `/(.*)` → `/api`). La persistencia va en Upstash Redis mediante `src/services/store.js`.
-- `src/app.js` monta las rutas: `/twilio-webhook` (SMS), `/twilio-voice` (voz), `/lines` (API para n8n).
-- `src/routes/voice.js`: `POST /` responde TwiML según `keypressMode` (`auto|fixed|none`); además están `/transcription`, `/ended` y `/recording`.
-- `src/routes/twilio.js`: el SMS pasa por `sendToSlack({channel, friendlyName, toNumber, fromNumber, body})` y luego por `logTransaction`.
-- `src/services/numbers.js`: directorio en `config/numbers.json` con `name, channel, routing, dtmf, language, keypressMode`. `routing` ya admite `vapi`.
-- `src/services/capabilities.js`: sincroniza con la API de Twilio, y **fallaría o marcaría mal** los números Zadarma. Hay que excluirlos.
+### Twilio (cuenta "Darwin AI")
+| Recurso | Valor |
+|---|---|
+| IP Access Control List | `zadarma` (SID `ALdc47c61d5e718840ce9afdeef133546d`), con 12 IPs /32: 185.45.152.216 (sipurifr), 185.45.155.33 (sipuriny), 185.45.152.164, 185.45.152.177, 185.45.152.200, 185.45.155.14, 185.45.155.16, 195.122.19.20, 195.122.19.29, 15.235.128.70, 31.31.222.201, 185.45.154.15 |
+| SIP Domain | `darwin-zadarma.sip.twilio.com` (friendly name "Zadarma WalkieTalkie"), región US1 |
+| Autenticación del domain | Solo la IP ACL `zadarma`. No hay credential list ni SIP Registration. |
+| A call comes in | Webhook `POST https://walkietalkie-kappa.vercel.app/twilio-voice` |
+| `WEBHOOK_BASE_URL` en prod | `https://walkietalkie-kappa.vercel.app` |
+
+Según el panel de Zadarma, la señalización SIP del "Servidor externo" sale de **185.45.152.216 y 185.45.155.33**. El RTP (audio) puede venir de las subredes 185.45.152.0/24, 185.45.154.0/24, 185.45.155.0/24, 195.122.19.0/27, 31.31.222.192/27 y 15.235.128.64/28. La IP ACL de Twilio solo filtra la señalización.
+
+### Zadarma
+| Número | Configuración |
+|---|---|
+| `+528718430130` (México, Torreón) | Servidor externo (SIP URI) = `528718430130@darwin-zadarma.sip.twilio.com`. Antes apuntaba al SIP interno `113056`. Es la línea de prueba. |
+| `+524426445470` (Querétaro) | **No se tocó.** Apunta a otro SIP URI (`+524426445470@sip…`, posiblemente VAPI). |
+
+Pendiente (lo hacen el código y el script): API key/secret de Zadarma, webhook de SMS y `receive_sms` del número.
+
+---
+
+## 6. Guía de configuración de un número Zadarma (estándar)
+
+**Convención:** SIP URI = `<E164 sin +>@darwin-zadarma.sip.twilio.com`. Un solo SIP Domain sirve para todas las líneas, y la línea se identifica por el *user part*.
+
+1. **Zadarma, voz.** Panel: my.zadarma.com → Settings → Virtual phone numbers → ⚙️ → pestaña **Servidor externo** → ☑ *Servidor externo (SIP URI)* → `<num>@darwin-zadarma.sip.twilio.com` → GUARDAR. O por API: `PUT /v1/direct_numbers/set_sip_id/`.
+2. **Zadarma, SMS** (solo si el número lo soporta): `PUT /v1/direct_numbers/receive_sms/` con `value=on`. El webhook es global (una vez): `POST /v1/pbx/webhooks/url/` y luego `POST /v1/pbx/webhooks/hooks/` con `sms=true`.
+3. **Twilio:** no se toca nada por número.
+4. **WalkieTalkie:** alta en el directorio con `provider: "zadarma"`, `name`, `channel`, `keypressMode: "auto"` (anti-bot de Meta) y `language` si aplica.
+5. **Prueba:** llamar → thread en Slack, "🔢 IVR asked for key…", grabación y transcripción; en Twilio → Monitor → Calls debe verse entrando por `darwin-zadarma.sip.twilio.com`. Mandar un SMS → llega al thread del día.
+
+Todo el paso a paso para personas sin acceso al código está en [`ZADARMA_SETUP.md`](./ZADARMA_SETUP.md).
+
+**Troubleshooting:** ver `ZADARMA_SETUP.md` §5. Para revertir: desmarcar "Servidor externo" y volver a elegir el SIP interno en la pestaña Ajustes.
+
+---
+
+## 7. Implementación en el repo (estado actual)
+
+- **Rama base: `feat/vercel-serverless-migration`.** `main` solo tiene docs y config.
+- **Directorio:** `provider: "twilio" | "zadarma"` (default `twilio`, no se persiste). Helpers puros en `src/services/provider.js`. Se propaga en `setNumber`, `/numbers.csv` (columna `provider`), import de CSV (modal y `scripts/configure-from-csv.js`) y `POST /lines`.
+- **Voz:** `src/routes/voice.js` normaliza `To`/`From` (`resolveCallParties` en `src/services/phone.js`) **antes** de usarlos, guarda `provider: 'zadarma'` en el call thread cuando `To` es SIP del domain `ZADARMA_TWILIO_SIP_DOMAIN`, y loguea el body crudo (`SIP call raw body`) para confirmar el formato real. `/transcription`, `/ended`, `/recording` y `pressKeyOnLiveCall` solo usan `CallSid` y el thread guardado, así que no dependen del formato de `To`. `twilioValidate` no se toca (Twilio firma igual las llamadas SIP; **[confirmar en la 1ª llamada real]**).
+- **Capabilities:** `checkAndCacheCapabilities` y `connectNumberToWalkieTalkie` nunca consultan Twilio para líneas Zadarma, y `syncAllCapabilities` las excluye. En la App Home se muestra "Voz vía SIP".
+- **SMS:** `src/routes/zadarma.js` (`/zadarma-webhook`, `zd_echo` en GET y POST) + `src/middleware/zadarmaValidate.js` (firma `base64(raw)` o `base64(hex)`, `timingSafeEqual`, `ZADARMA_STRICT_SIGNATURE`) + `src/services/inboundSms.js` (`handleInboundSms`, compartido con `/twilio-webhook`; los logs de Zadarma llevan `provider: 'zadarma'`).
+- **Cliente API:** `src/services/zadarma.js` (`fetch` nativo; `listNumbers`, `getNumber`, `setSipUri`, `setReceiveSms`, `setSmsWebhook`). Credenciales: `getSetting('zadarma.apiKey'|'zadarma.apiSecret')` con fallback a `ZADARMA_API_KEY`/`ZADARMA_API_SECRET`.
+- **Provisioning:** `src/services/zadarmaLines.js` (`connectZadarmaLine`, idempotente; nunca toca `routing` vapi/talkyto/pipecat) y `src/services/zadarmaProvision.js`, usados por `scripts/configure-zadarma.js` (`--dry-run`, `--import`), la App Home (🔗 Conectar a WalkieTalkie) y `POST /lines`.
+- **Lo que sigue sin confirmar [NO CONFIRMADO]:** formato exacto de `To`/`From` SIP, firma del evento `SMS`, valor del campo `sip` que devuelve `GET /v1/direct_numbers/` para un "Servidor externo" (se usa solo para decidir si hace falta reescribirlo; `setSipUri` es idempotente), y el nombre/valor del parámetro de `/v1/pbx/webhooks/hooks/` (`sms=true`).
 - `backgroundTask()` mantiene vivo el trabajo en segundo plano en Vercel (`waitUntil`).
