@@ -4,6 +4,7 @@ const { backgroundTask } = require('../services/background');
 const { setSetting, getSetting } = require('../services/settings');
 const { setNumber, removeNumber, loadConfig, replaceAllNumbers, getGlobalKeypressMode } = require('../services/numbers');
 const { isKeypressMode, sanitizeDtmf } = require('../services/ivrKeypress');
+const { normalizeProvider, isZadarmaEntry } = require('../services/provider');
 const { syncAllCapabilities, connectNumberToWalkieTalkie } = require('../services/capabilities');
 const {
   buildAppHomeView,
@@ -395,13 +396,16 @@ boltApp.view('modal_number', async ({ ack, view, client, body }) => {
   const existingEntry = existingNumbers[phone];
   const existingRouting = (existingEntry && typeof existingEntry === 'object' && existingEntry.routing) || '';
   const isExternal = EXTERNAL_ROUTING_PROVIDERS.has(existingRouting.toLowerCase());
+  const isZadarma = isZadarmaEntry(existingEntry);
 
   await setNumber(phone, { name, channel, dtmf, language, keypressMode });
 
   let notifText = `✓ ${phone}${name ? ` (${name})` : ''} guardado.`;
 
   // Auto-connect on every save so no line is ever left pointing at a dead webhook
-  if (!isExternal) {
+  if (isZadarma) {
+    notifText += ' Línea Zadarma — usa «🔗 Conectar a WalkieTalkie» para enlazarla (Twilio no se toca).';
+  } else if (!isExternal) {
     try {
       const caps = await connectNumberToWalkieTalkie(phone);
       const connected = [caps.sms ? 'SMS' : null, caps.voice ? 'Voice' : null].filter(Boolean).join(' + ');
@@ -491,6 +495,7 @@ function buildNumbersMapFromRows(rows) {
     const keypressMode = (row.keypress_mode || '').toLowerCase().trim();
     const dtmf = sanitizeDtmf(row.dtmf) || '';
     const language = (row.language || '').toLowerCase().trim();
+    const provider = normalizeProvider(row.provider);
 
     const entry = {};
     if (name) entry.name = name;
@@ -499,6 +504,7 @@ function buildNumbersMapFromRows(rows) {
     if (isKeypressMode(keypressMode)) entry.keypressMode = keypressMode;
     if (dtmf) entry.dtmf = dtmf;
     if (/^[a-z]{2}$/.test(language)) entry.language = language;
+    if (provider !== 'twilio') entry.provider = provider;
 
     if (Object.keys(entry).length === 0) numbersMap[phone] = '';
     else if (Object.keys(entry).length === 1 && entry.name) numbersMap[phone] = name;

@@ -5,6 +5,7 @@ const linesRouter = require('./routes/lines');
 const { loadLogs } = require('./services/logger');
 const { getCapabilities, syncIfStale, syncAllCapabilities } = require('./services/capabilities');
 const { loadConfig } = require('./services/numbers');
+const { entryProvider } = require('./services/provider');
 const adminAuth = require('./middleware/adminAuth');
 
 // ─── Mount routes on Bolt's Express receiver ──────────────────────────────────
@@ -54,11 +55,12 @@ app.get('/capabilities', adminAuth, async (req, res) => {
 });
 
 // Number directory CSV export — used by the "Download CSV" button in Slack App Home
-// Columns: phone_number, friendly_name, channel_id, routing, sms, voice, keypress_mode, dtmf, language
+// Columns: phone_number, friendly_name, channel_id, routing, sms, voice, keypress_mode, dtmf, language, provider
 //   routing: "walkietalkie" or "vapi" (detected from Twilio voiceUrl/smsUrl in capabilities cache)
 //   sms/voice: yes/no from capabilities cache (blank if not yet scanned)
 //   keypress_mode: auto | fixed | none — blank means "inherit the global default"
 //   dtmf: digits pressed in fixed mode; language: forced Whisper language (blank = auto)
+//   provider: twilio | zadarma (blank in the directory = twilio)
 // Escapes a CSV field: neutralizes spreadsheet formula injection (=, +, -, @)
 // and quotes fields containing commas, quotes, or newlines.
 function csvField(value) {
@@ -72,7 +74,7 @@ function csvField(value) {
 app.get('/numbers.csv', adminAuth, async (req, res) => {
   const { numbers } = await loadConfig();
   const caps = (await getCapabilities()).numbers;
-  const rows = ['phone_number,friendly_name,channel_id,routing,sms,voice,keypress_mode,dtmf,language'];
+  const rows = ['phone_number,friendly_name,channel_id,routing,sms,voice,keypress_mode,dtmf,language,provider'];
 
   for (const [phone, entry] of Object.entries(numbers)) {
     const name = typeof entry === 'string' ? entry : (entry.name || '');
@@ -92,7 +94,9 @@ app.get('/numbers.csv', adminAuth, async (req, res) => {
     const dtmf = isObj ? (entry.dtmf || '') : '';
     const language = isObj ? (entry.language || '') : '';
 
-    rows.push([phone, name, channel, routing, sms, voice, keypressMode, dtmf, language].map(csvField).join(','));
+    const provider = entryProvider(entry);
+
+    rows.push([phone, name, channel, routing, sms, voice, keypressMode, dtmf, language, provider].map(csvField).join(','));
   }
 
   res.setHeader('Content-Type', 'text/csv');

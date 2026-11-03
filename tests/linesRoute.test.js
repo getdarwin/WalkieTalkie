@@ -145,3 +145,33 @@ test('DELETE removes the line and is idempotent', async () => {
   const second = await call('DELETE', '/lines/541148999365');
   assert.deepEqual(second.body, { ok: true, phone: '+541148999365', removed: false });
 });
+
+test('provider zadarma: guarda la línea y NUNCA llama a Twilio', async () => {
+  const res = await call('POST', '/lines', { phone: '+525512345678', client: 'Acme', owner: 'Ana', provider: 'zadarma' });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.provider, 'zadarma');
+  assert.equal(res.body.sms, false);
+  assert.deepEqual(connectCalls, []);
+  assert.equal(memory.get('numbers')['+525512345678'].provider, 'zadarma');
+});
+
+test('provider zadarma se conserva en un reintento sin provider', async () => {
+  memory.set('numbers', { '+525512345678': { name: 'Acme - Ana', provider: 'zadarma' } });
+  const res = await call('POST', '/lines', { phone: '+525512345678', client: 'Acme', owner: 'Ana' });
+  assert.equal(res.status, 200);
+  assert.deepEqual(connectCalls, []);
+  assert.equal(memory.get('numbers')['+525512345678'].provider, 'zadarma');
+});
+
+test('provider inválido responde 400 y no guarda nada', async () => {
+  const res = await call('POST', '/lines', { phone: '+525512345678', client: 'Acme', provider: 'vonage' });
+  assert.equal(res.status, 400);
+  assert.equal(memory.get('numbers')['+525512345678'], undefined);
+});
+
+test('sin provider el flujo Twilio sigue igual', async () => {
+  const res = await call('POST', '/lines', { phone: '+541148999365', client: 'Acme', owner: 'Ana' });
+  assert.equal(res.status, 200);
+  assert.deepEqual(connectCalls, ['+541148999365']);
+  assert.equal(memory.get('numbers')['+541148999365'].provider, undefined);
+});
