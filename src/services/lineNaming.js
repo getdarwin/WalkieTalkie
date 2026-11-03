@@ -2,7 +2,8 @@
 // purchase flow). No I/O here so they can be unit-tested with node:test.
 
 const MAX_FIELD_LENGTH = 80;
-const E164 = /^\+\d{8,15}$/;
+// /lines valida con la versión estricta: '' cuando no es un E.164 válido.
+const { parseE164: normalizeE164 } = require('./phone');
 
 /** Trims, strips control characters and collapses whitespace. */
 function cleanText(value) {
@@ -13,12 +14,6 @@ function cleanText(value) {
     .slice(0, MAX_FIELD_LENGTH);
 }
 
-/** "+54 11 4899-9365" → "+541148999365"; returns '' when it is not a valid E.164 number. */
-function normalizeE164(raw) {
-  const digits = String(raw ?? '').replace(/\D/g, '');
-  const phone = `+${digits}`;
-  return E164.test(phone) ? phone : '';
-}
 
 function escapeRegExp(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

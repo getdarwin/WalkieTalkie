@@ -1,7 +1,8 @@
 const twilio = require('twilio');
 const store = require('./store');
 const { getSetting } = require('./settings');
-const { loadConfig, setNumber } = require('./numbers');
+const { loadConfig, setNumber, getProvider } = require('./numbers');
+const { isZadarmaEntry } = require('./provider');
 
 const CAPABILITIES_KEY = 'capabilities';
 const SYNC_INTERVAL_DAYS = 14;
@@ -77,6 +78,9 @@ async function syncAllCapabilities() {
   let autoImported = 0;
 
   for (const num of numbers) {
+    // Zadarma lines are managed through the Zadarma API; never cache/auto-import them from Twilio
+    if (isZadarmaEntry(configNumbers[num.phoneNumber])) continue;
+
     data.numbers[num.phoneNumber] = buildRecord(num);
 
     // Auto-import numbers already connected to this WalkieTalkie instance
@@ -147,6 +151,8 @@ async function fetchSingleCapability(e164) {
  * @param {string} e164
  */
 async function checkAndCacheCapabilities(e164) {
+  // Zadarma lines do not exist in the Twilio account — never query Twilio for them
+  if ((await getProvider(e164)) === 'zadarma') return;
   const { numbers } = await loadCapabilities();
   if (numbers[e164]) return;
   await fetchSingleCapability(e164);
@@ -168,6 +174,9 @@ async function getCapabilities() {
  * @returns {Promise<{ sms: boolean, voice: boolean }>} capabilities that were connected
  */
 async function connectNumberToWalkieTalkie(phone) {
+  if ((await getProvider(phone)) === 'zadarma') {
+    throw new Error(`${phone} es una línea Zadarma: se conecta con configure-zadarma / «Conectar a WalkieTalkie», no con Twilio`);
+  }
   const baseUrl = process.env.WEBHOOK_BASE_URL;
   if (!baseUrl) throw new Error('WEBHOOK_BASE_URL is not configured');
 

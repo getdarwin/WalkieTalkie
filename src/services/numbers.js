@@ -3,6 +3,7 @@ const path = require('path');
 const store = require('./store');
 const { getSetting } = require('./settings');
 const { resolveKeypressMode, isKeypressMode, DEFAULT_KEYPRESS_MODE } = require('./ivrKeypress');
+const { entryProvider, normalizeProvider, buildEntry } = require('./provider');
 
 const NUMBERS_KEY = 'numbers';
 const SEED_PATH = path.join(__dirname, '../../config/numbers.json');
@@ -120,36 +121,35 @@ async function getLanguage(phoneNumber) {
  * If name and channel are both empty, stores a simple string (empty string).
  *
  * @param {string} phoneNumber  E.164 format
- * @param {{ name?: string, channel?: string, dtmf?: string, language?: string, keypressMode?: string, routing?: string }} opts
+ * @param {{ name?: string, channel?: string, dtmf?: string, language?: string, keypressMode?: string, routing?: string, provider?: string }} opts
  *   keypressMode: "auto" | "fixed" | "none"; empty string = inherit the global default
  */
-async function setNumber(phoneNumber, { name = '', channel = '', dtmf = '', language = '', keypressMode = '', routing = '' } = {}) {
+async function setNumber(phoneNumber, { name = '', channel = '', dtmf = '', language = '', keypressMode = '', routing = '', provider = '' } = {}) {
   const { numbers } = await loadConfig();
   const updated = { ...numbers };
 
-  // Preserve external routing (vapi/talkyto/pipecat) unless explicitly overridden
+  // Preserve external routing (vapi/talkyto/pipecat) and the provider unless explicitly overridden
   const existing = updated[phoneNumber];
   const preservedRouting = routing || ((existing && typeof existing === 'object' && existing.routing) || '');
+  const preservedProvider = provider ? normalizeProvider(provider) : entryProvider(existing);
 
   delete updated[phoneNumber]; // move to end so .reverse() shows it first in App Home
 
-  const entry = {};
-  if (name) entry.name = name;
-  if (channel) entry.channel = channel;
-  if (dtmf) entry.dtmf = dtmf;
-  if (language) entry.language = language;
-  if (isKeypressMode(keypressMode)) entry.keypressMode = keypressMode;
-  if (preservedRouting) entry.routing = preservedRouting;
-
-  const keys = Object.keys(entry);
-  if (keys.length === 0) {
-    updated[phoneNumber] = '';
-  } else if (keys.length === 1 && entry.name) {
-    updated[phoneNumber] = name; // backward compat: plain string when only name
-  } else {
-    updated[phoneNumber] = entry;
-  }
+  updated[phoneNumber] = buildEntry({
+    name, channel, dtmf, language, keypressMode, routing: preservedRouting, provider: preservedProvider,
+  });
   await saveNumbers(updated);
+}
+
+/**
+ * Provider of a number ("twilio" | "zadarma"); unknown/legacy entries are "twilio".
+ *
+ * @param {string} phoneNumber  E.164 format
+ * @returns {Promise<'twilio'|'zadarma'>}
+ */
+async function getProvider(phoneNumber) {
+  const { numbers } = await loadConfig();
+  return entryProvider(numbers[phoneNumber]);
 }
 
 /**
@@ -180,6 +180,7 @@ module.exports = {
   getChannel,
   getDtmf,
   getLanguage,
+  getProvider,
   getGlobalKeypressMode,
   getKeypressConfig,
   setNumber,

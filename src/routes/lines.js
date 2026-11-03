@@ -4,9 +4,11 @@ const { loadConfig, setNumber, removeNumber } = require('../services/numbers');
 const { connectNumberToWalkieTalkie } = require('../services/capabilities');
 const { logTransaction } = require('../services/logger');
 const { cleanText, normalizeE164, buildLineName, directoryNames } = require('../services/lineNaming');
+const { normalizeProvider, entryProvider } = require('../services/provider');
+const { connectZadarmaLine } = require('../services/zadarmaLines');
 
 // Provisioning API for the n8n line-purchase flow (#solicitud-compra-lineaswhatsapp).
-//   POST   /lines         { phone, client, owner?, channel? } → save + connect webhooks
+//   POST   /lines         { phone, client, owner?, channel?, provider?: "twilio"|"zadarma" } → save + connect webhooks
 //   DELETE /lines/:phone  → drop the line from the directory after it is released
 
 const router = express.Router();
@@ -31,6 +33,9 @@ router.post('/', wrap(async (req, res) => {
   const body = req.body || {};
   const phone = normalizeE164(body.phone);
   const channel = cleanText(body.channel);
+  if (body.provider !== undefined && !['twilio', 'zadarma'].includes(String(body.provider).trim().toLowerCase())) {
+    return res.status(400).json({ ok: false, error: 'provider must be "twilio" or "zadarma"' });
+  }
 
   if (!phone) {
     return res.status(400).json({ ok: false, error: 'phone must be a valid E.164 number, e.g. +541148999365' });
@@ -49,7 +54,25 @@ router.post('/', wrap(async (req, res) => {
     : buildLineName({ client: body.client, owner: body.owner }, directoryNames(numbers));
 
   const keepChannel = existing && typeof existing === 'object' ? existing.channel || '' : '';
-  await setNumber(phone, { ...(typeof existing === 'object' && existing ? existing : {}), name, channel: channel || keepChannel });
+  await setNumber(phone, { ...(typeof existing === 'object' && existing ? existing : {}), name, channel: channel || keepChannel,
+    ...(body.provider !== undefined ? { provider: normalizeProvider(body.provider) } : {}) });
+
+  // Zadarma lines are connected through the Zadarma API (SIP URI + receive_sms), never Twilio.
+  if (entryProvider({ provider: body.provider !== undefined ? body.provider : (existing && existing.provider) }) === 'zadarma') {
+    try {
+      const r = await connectZadarmaLine(phone);
+      if (r.skipped) {
+        return res.json({ ok: true, phone, name, sms: false, voice: false, provider: 'zadarma', external: r.skipped, created: !alreadySaved });
+      }
+      await logTransaction({ type: 'line-provisioned', to: phone, friendlyName: name, channel, provider: 'zadarma', status: 'success' });
+      return res.json({ ok: true, phone, name, sms: r.sms.ok, voice: r.voice, provider: 'zadarma', ...(r.sms.ok ? {} : { smsError: r.sms.error }), created: !alreadySaved });
+    } catch (err) {
+      console.error(`[lines] Failed to connect Zadarma line ${phone}:`, err.message);
+      await logTransaction({ type: 'line-provisioned', to: phone, friendlyName: name, channel, provider: 'zadarma', status: 'error', error: err.message });
+      // The directory entry stays saved so a retry (or the App Home) can finish the connection.
+      return res.status(502).json({ ok: false, phone, name, provider: 'zadarma', error: err.message });
+    }
+  }
 
   const routing = entryRouting(existing);
   if (EXTERNAL_ROUTING.has(routing.toLowerCase())) {

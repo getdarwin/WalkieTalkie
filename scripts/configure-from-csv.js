@@ -5,7 +5,8 @@
  *   node scripts/configure-from-csv.js path/to/numbers.csv
  *
  * CSV format (header row required):
- *   phone_number,friendly_name,channel_id,routing,sms,voice
+ *   phone_number,friendly_name,channel_id,routing,sms,voice[,provider]
+ *   provider      — "twilio" (default) or "zadarma" (saved only; Twilio is never touched)
  *
  *   phone_number  — E.164 format, required
  *   friendly_name — label shown in Slack threads (optional)
@@ -107,6 +108,7 @@ async function run() {
     const channel = row.channel_id || '';
     const routing = row.routing || 'walkietalkie';
     const externalLine = isExternalRouting(routing);
+    const provider = (row.provider || '').toLowerCase().trim() === 'zadarma' ? 'zadarma' : 'twilio';
 
     process.stdout.write(`  ${phone}`);
 
@@ -115,6 +117,7 @@ async function run() {
     if (name) entry.name = name;
     if (channel) entry.channel = channel;
     if (externalLine) entry.routing = routing.toLowerCase().trim();
+    if (provider === 'zadarma') entry.provider = 'zadarma';
 
     if (Object.keys(entry).length === 1 && entry.name) {
       config.numbers[phone] = name; // simple string form
@@ -123,6 +126,12 @@ async function run() {
     }
     // If all blank, still register the number with empty entry
     if (!config.numbers[phone]) config.numbers[phone] = '';
+
+    // 2a. Zadarma lines are not in the Twilio account: use scripts/configure-zadarma.js
+    if (provider === 'zadarma') {
+      console.log(`  ⊘  ${phone}${name ? `  "${name}"` : ''}  [Zadarma — run scripts/configure-zadarma.js]`);
+      continue;
+    }
 
     // 2. Skip Twilio webhook config for external routing lines
     if (externalLine) {

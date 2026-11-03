@@ -48,6 +48,8 @@ const ENV_FALLBACKS = {
   'twilio.accountSid': 'TWILIO_ACCOUNT_SID',
   'twilio.authToken': 'TWILIO_AUTH_TOKEN',
   'slack.defaultChannel': 'SLACK_DEFAULT_CHANNEL',
+  'zadarma.apiKey': 'ZADARMA_API_KEY',
+  'zadarma.apiSecret': 'ZADARMA_API_SECRET',
 };
 
 // ─── Public API ───────────────────────────────────────────────────────────────

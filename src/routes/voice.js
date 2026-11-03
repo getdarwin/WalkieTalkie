@@ -6,6 +6,9 @@ const twilioValidate = require('../middleware/twilioValidate');
 const { getSetting } = require('../services/settings');
 const { getFriendlyName, getChannel, getLanguage, getKeypressConfig } = require('../services/numbers');
 const { checkAndCacheCapabilities } = require('../services/capabilities');
+const { resolveCallParties } = require('../services/phone');
+
+const DEFAULT_ZADARMA_SIP_DOMAIN = 'darwin-zadarma.sip.twilio.com';
 const { saveCallThread, getCallThread, updateCallThread } = require('../services/callThreads');
 const { logTransaction } = require('../services/logger');
 const { sendCallStartToSlack, postToThread, parseOtp, buildCallTranscriptBlocks } = require('../services/slack');
@@ -187,15 +190,25 @@ async function transcribeWithGroq(buffer, filename, language = null) {
 // ─── POST /twilio-voice ───────────────────────────────────────────────────────
 
 router.post('/', twilioValidate, async (req, res) => {
-  const { From, To, CallSid } = req.body;
+  const { CallSid } = req.body;
+  // Calls from Zadarma arrive over SIP (To = "sip:<DID>@<domain>.sip.twilio.com").
+  // Normalize to E.164 up front so the directory, Slack and call threads see the same key.
+  const { to: To, from: From, sip, provider } = resolveCallParties(req.body, {
+    zadarmaDomain: process.env.ZADARMA_TWILIO_SIP_DOMAIN || DEFAULT_ZADARMA_SIP_DOMAIN,
+  });
 
   if (!From || !To || !CallSid) {
     console.warn('[voice] Malformed payload — missing From/To/CallSid');
     return twimlResponse(res);
   }
 
-  console.log(`[voice] Incoming call  To=${To}  From=${From}  CallSid=${CallSid}`);
+  // The exact SIP format is unconfirmed: log the raw body once per call to verify it.
+  if (sip) {
+    console.log(`[voice] SIP call raw body: ${JSON.stringify(req.body).slice(0, 2000)}`);
+  }
+  console.log(`[voice] Incoming call  To=${To}  From=${From}  CallSid=${CallSid}${sip ? '  (via SIP)' : ''}`);
 
+  // checkAndCacheCapabilities itself skips Zadarma lines (they are not in the Twilio account)
   backgroundTask(checkAndCacheCapabilities(To));
 
   const [friendlyName, channel, keypress] = await Promise.all([
@@ -209,6 +222,7 @@ router.post('/', twilioValidate, async (req, res) => {
     await saveCallThread(CallSid, {
       channel, threadTs, toNumber: To, fromNumber: From, friendlyName,
       keypressMode: keypress.mode,
+      ...(provider === 'zadarma' ? { provider } : {}),
     });
   } catch (err) {
     console.error('[voice] Failed to post call start to Slack:', err.message);
