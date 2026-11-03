@@ -435,6 +435,11 @@
     "+525599630326": {
       "name": "juan- chico nuevo2",
       "dtmf": "wwwwww1"
+    },
+    "+528718430130": {
+      "name": "Zadarma Torreón",
+      "provider": "zadarma",
+      "keypressMode": "auto"
     }
   }
 }

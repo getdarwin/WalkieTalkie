@@ -92,6 +92,12 @@ function createClient({ getCredentials = defaultCredentials, fetchImpl = fetch }
     async listNumbers() {
       return (await request('GET', '/v1/direct_numbers/')).numbers || [];
     },
+    /** @returns {Promise<object|null>} el número (comparando solo dígitos) o null si no está en la cuenta */
+    async getNumber(number) {
+      const digits = toDid(number);
+      const all = (await request('GET', '/v1/direct_numbers/')).numbers || [];
+      return all.find((n) => toDid(n.number) === digits) || null;
+    },
     /** Apunta el número a un SIP URI (External Server). */
     async setSipUri(number, sipUri) {
       return request('PUT', '/v1/direct_numbers/set_sip_id/', { number: toDid(number), sip_id: sipUri });

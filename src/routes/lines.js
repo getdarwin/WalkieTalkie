@@ -5,6 +5,7 @@ const { connectNumberToWalkieTalkie } = require('../services/capabilities');
 const { logTransaction } = require('../services/logger');
 const { cleanText, normalizeE164, buildLineName, directoryNames } = require('../services/lineNaming');
 const { normalizeProvider, entryProvider } = require('../services/provider');
+const { connectZadarmaLine } = require('../services/zadarmaLines');
 
 // Provisioning API for the n8n line-purchase flow (#solicitud-compra-lineaswhatsapp).
 //   POST   /lines         { phone, client, owner?, channel?, provider?: "twilio"|"zadarma" } → save + connect webhooks
@@ -56,9 +57,21 @@ router.post('/', wrap(async (req, res) => {
   await setNumber(phone, { ...(typeof existing === 'object' && existing ? existing : {}), name, channel: channel || keepChannel,
     ...(body.provider !== undefined ? { provider: normalizeProvider(body.provider) } : {}) });
 
-  // Zadarma lines are never touched in Twilio; connect them with scripts/configure-zadarma.js
+  // Zadarma lines are connected through the Zadarma API (SIP URI + receive_sms), never Twilio.
   if (entryProvider({ provider: body.provider !== undefined ? body.provider : (existing && existing.provider) }) === 'zadarma') {
-    return res.json({ ok: true, phone, name, sms: false, voice: false, provider: 'zadarma', created: !alreadySaved });
+    try {
+      const r = await connectZadarmaLine(phone);
+      if (r.skipped) {
+        return res.json({ ok: true, phone, name, sms: false, voice: false, provider: 'zadarma', external: r.skipped, created: !alreadySaved });
+      }
+      await logTransaction({ type: 'line-provisioned', to: phone, friendlyName: name, channel, provider: 'zadarma', status: 'success' });
+      return res.json({ ok: true, phone, name, sms: r.sms.ok, voice: r.voice, provider: 'zadarma', ...(r.sms.ok ? {} : { smsError: r.sms.error }), created: !alreadySaved });
+    } catch (err) {
+      console.error(`[lines] Failed to connect Zadarma line ${phone}:`, err.message);
+      await logTransaction({ type: 'line-provisioned', to: phone, friendlyName: name, channel, provider: 'zadarma', status: 'error', error: err.message });
+      // The directory entry stays saved so a retry (or the App Home) can finish the connection.
+      return res.status(502).json({ ok: false, phone, name, provider: 'zadarma', error: err.message });
+    }
   }
 
   const routing = entryRouting(existing);

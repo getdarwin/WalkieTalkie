@@ -2,6 +2,7 @@ const twilio = require('twilio');
 const store = require('./store');
 const { getSetting } = require('./settings');
 const { loadConfig, setNumber, getProvider } = require('./numbers');
+const { isZadarmaEntry } = require('./provider');
 
 const CAPABILITIES_KEY = 'capabilities';
 const SYNC_INTERVAL_DAYS = 14;
@@ -77,6 +78,9 @@ async function syncAllCapabilities() {
   let autoImported = 0;
 
   for (const num of numbers) {
+    // Zadarma lines are managed through the Zadarma API; never cache/auto-import them from Twilio
+    if (isZadarmaEntry(configNumbers[num.phoneNumber])) continue;
+
     data.numbers[num.phoneNumber] = buildRecord(num);
 
     // Auto-import numbers already connected to this WalkieTalkie instance

@@ -95,3 +95,9 @@ test('sin credenciales: error claro y no hay request', async () => {
   await assert.rejects(() => client.listNumbers(), /credenciales de Zadarma/i);
   assert.equal(calls.length, 0);
 });
+
+test('getNumber: encuentra por dígitos ignorando el +, o devuelve null', async () => {
+  const { client } = fakeClient(() => ok({ numbers: [{ number: '528718430130', sip: '113056' }, { number: '524426445470' }] }));
+  assert.deepEqual(await client.getNumber('+528718430130'), { number: '528718430130', sip: '113056' });
+  assert.equal(await client.getNumber('+5215500000000'), null);
+});

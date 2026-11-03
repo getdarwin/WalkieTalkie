@@ -32,6 +32,17 @@ stubModule('src/services/capabilities.js', {
   },
 });
 
+let zadarmaResult = { voice: true, sms: { ok: true } };
+let zadarmaError = null;
+const zadarmaCalls = [];
+stubModule('src/services/zadarmaLines.js', {
+  connectZadarmaLine: async (phone) => {
+    zadarmaCalls.push(phone);
+    if (zadarmaError) throw new Error(zadarmaError);
+    return { phone, ...zadarmaResult };
+  },
+});
+
 const express = require('express');
 const linesRouter = require('../src/routes/lines');
 
@@ -53,6 +64,9 @@ beforeEach(() => {
   memory.set('numbers', { '+5215500000001': 'NP Digital' });
   connectCalls.length = 0;
   connectError = null;
+  zadarmaCalls.length = 0;
+  zadarmaError = null;
+  zadarmaResult = { voice: true, sms: { ok: true } };
   process.env.LINES_API_SECRET = SECRET;
 });
 
@@ -146,19 +160,40 @@ test('DELETE removes the line and is idempotent', async () => {
   assert.deepEqual(second.body, { ok: true, phone: '+541148999365', removed: false });
 });
 
-test('provider zadarma: guarda la línea y NUNCA llama a Twilio', async () => {
+test('provider zadarma: guarda la línea, la conecta con Zadarma y NUNCA llama a Twilio', async () => {
   const res = await call('POST', '/lines', { phone: '+525512345678', client: 'Acme', owner: 'Ana', provider: 'zadarma' });
   assert.equal(res.status, 200);
   assert.equal(res.body.provider, 'zadarma');
-  assert.equal(res.body.sms, false);
+  assert.equal(res.body.voice, true);
+  assert.equal(res.body.sms, true);
+  assert.deepEqual(zadarmaCalls, ['+525512345678']);
   assert.deepEqual(connectCalls, []);
   assert.equal(memory.get('numbers')['+525512345678'].provider, 'zadarma');
+});
+
+test('provider zadarma sin soporte de SMS: 200, voz conectada y el error de SMS reportado', async () => {
+  zadarmaResult = { voice: true, sms: { ok: false, error: 'SMS not supported' } };
+  const res = await call('POST', '/lines', { phone: '+525512345678', client: 'Acme', provider: 'zadarma' });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.voice, true);
+  assert.equal(res.body.sms, false);
+  assert.equal(res.body.smsError, 'SMS not supported');
+});
+
+test('provider zadarma: si Zadarma falla → 502 y la línea queda guardada para reintentar', async () => {
+  zadarmaError = 'Zadarma: Wrong number';
+  const res = await call('POST', '/lines', { phone: '+525512345678', client: 'Acme', provider: 'zadarma' });
+  assert.equal(res.status, 502);
+  assert.equal(res.body.ok, false);
+  assert.equal(memory.get('numbers')['+525512345678'].provider, 'zadarma');
+  assert.deepEqual(connectCalls, []);
 });
 
 test('provider zadarma se conserva en un reintento sin provider', async () => {
   memory.set('numbers', { '+525512345678': { name: 'Acme - Ana', provider: 'zadarma' } });
   const res = await call('POST', '/lines', { phone: '+525512345678', client: 'Acme', owner: 'Ana' });
   assert.equal(res.status, 200);
+  assert.deepEqual(zadarmaCalls, ['+525512345678']);
   assert.deepEqual(connectCalls, []);
   assert.equal(memory.get('numbers')['+525512345678'].provider, 'zadarma');
 });
@@ -173,5 +208,6 @@ test('sin provider el flujo Twilio sigue igual', async () => {
   const res = await call('POST', '/lines', { phone: '+541148999365', client: 'Acme', owner: 'Ana' });
   assert.equal(res.status, 200);
   assert.deepEqual(connectCalls, ['+541148999365']);
+  assert.deepEqual(zadarmaCalls, []);
   assert.equal(memory.get('numbers')['+541148999365'].provider, undefined);
 });
