@@ -1,6 +1,7 @@
 const { receiver, boltApp } = require('./bolt/app');
 const twilioRouter = require('./routes/twilio');
 const voiceRouter = require('./routes/voice');
+const zadarmaRouter = require('./routes/zadarma');
 const linesRouter = require('./routes/lines');
 const { loadLogs } = require('./services/logger');
 const { getCapabilities, syncIfStale, syncAllCapabilities } = require('./services/capabilities');
@@ -132,5 +133,8 @@ app.use('/lines', linesRouter);
 // Twilio webhooks
 app.use('/twilio-webhook', twilioRouter);
 app.use('/twilio-voice', voiceRouter);
+
+// Zadarma native webhooks (SMS) — signature checked by middleware/zadarmaValidate
+app.use('/zadarma-webhook', zadarmaRouter);
 
 module.exports = { app, boltApp };
