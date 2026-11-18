@@ -13,6 +13,8 @@ const { saveCallThread, getCallThread, updateCallThread } = require('../services
 const { logTransaction } = require('../services/logger');
 const { sendCallStartToSlack, postToThread, parseOtp, buildCallTranscriptBlocks } = require('../services/slack');
 const { backgroundTask } = require('../services/background');
+const { uploadFileToThread, uploadFailureNotice } = require('../services/slackUpload');
+const { resolveCallThread } = require('../services/callThreadResolver');
 const { detectKeypress, detectKeypressSmart } = require('../services/ivrKeypress');
 const store = require('../services/store');
 
@@ -32,6 +34,11 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const IVR_LOG_MAX_SEGMENTS = 100;
 const IVR_LOG_TTL_SECONDS = 24 * 60 * 60;
 const KEYPRESS_LOCK_TTL_SECONDS = 60 * 60;
+
+// Twilio drops the call if the answer webhook takes ~15s. Posting to Slack is
+// never allowed to hold the TwiML longer than this; the post finishes in the
+// background and callbacks wait for / rebuild the thread (resolveCallThread).
+const CALL_START_MAX_WAIT_MS = 5_000;
 
 const ivrLogKey = (callSid) => `ivrlog:${callSid}`;
 const keypressLockKey = (callSid) => `ivrpress:${callSid}`;
@@ -94,12 +101,16 @@ function liveTranscriptionTwiml(baseUrl, callSid) {
  * Redirects the live call to new TwiML: press the requested key, then keep
  * recording so the verification code that follows is captured.
  */
-async function pressKeyOnLiveCall(callSid, digit, baseUrl) {
+async function twilioClient() {
   const [accountSid, authToken] = await Promise.all([
     getSetting('twilio.accountSid'),
     getSetting('twilio.authToken'),
   ]);
-  const client = twilio(accountSid, authToken);
+  return twilio(accountSid, authToken);
+}
+
+async function pressKeyOnLiveCall(callSid, digit, baseUrl) {
+  const client = await twilioClient();
   // "w" = 0.5s pause so the tone lands after the IVR finishes speaking.
   const twiml = `<Response><Play digits="w${digit}"/>${recordTwiml(baseUrl)}</Response>`;
   await client.calls(callSid).update({ twiml });
@@ -146,19 +157,6 @@ async function downloadRecording(recordingUrl) {
   }
 
   throw lastError;
-}
-
-/**
- * Uploads the MP3 buffer to a Slack thread as a file.
- */
-async function uploadAudioToSlack({ channel, threadTs, buffer, filename, duration }) {
-  await slack.files.uploadV2({
-    channel_id: channel,
-    thread_ts: threadTs,
-    file: buffer,
-    filename,
-    title: `📞 Recording — ${duration}s`,
-  });
 }
 
 /**
@@ -217,16 +215,30 @@ router.post('/', twilioValidate, async (req, res) => {
     getKeypressConfig(To),
   ]);
 
+  // Save the call first: if the Slack post is slow or fails, the recording
+  // callback still knows the line and can rebuild the thread.
   try {
-    const threadTs = await sendCallStartToSlack({ channel, friendlyName, toNumber: To, fromNumber: From });
     await saveCallThread(CallSid, {
-      channel, threadTs, toNumber: To, fromNumber: From, friendlyName,
+      channel, toNumber: To, fromNumber: From, friendlyName,
       keypressMode: keypress.mode,
       ...(provider === 'zadarma' ? { provider } : {}),
     });
   } catch (err) {
-    console.error('[voice] Failed to post call start to Slack:', err.message);
+    console.error(`[voice] Failed to save call record  CallSid=${CallSid}:`, err.message);
   }
+
+  const slackPost = (async () => {
+    const threadTs = await sendCallStartToSlack({ channel, friendlyName, toNumber: To, fromNumber: From });
+    await updateCallThread(CallSid, { threadTs });
+  })().catch((err) => {
+    console.error(`[voice] Failed to post call start to Slack  CallSid=${CallSid}:`, err.message);
+    return logTransaction({
+      type: 'voice-call-start', to: To, from: From, callSid: CallSid, friendlyName, channel,
+      otp: null, status: 'error', error: err.message,
+    });
+  });
+  backgroundTask(slackPost);
+  await Promise.race([slackPost, sleep(CALL_START_MAX_WAIT_MS)]);
 
   console.log(`[voice] Keypress mode=${keypress.mode} (${keypress.source})  To=${To}`);
   twimlResponse(res, buildAnswerTwiml(CallSid, keypress));
@@ -323,10 +335,17 @@ async function handleLiveTranscript(callSid, transcript, isFinal) {
 
   console.log(`[voice] IVR asks for key "${keypress.digit}"  CallSid=${callSid}  via=${source}  ("${keypress.matched}")`);
 
-  const thread = await getCallThread(callSid);
+  // Press first (the IVR is waiting), then look up the thread for the note.
+  const threadPromise = threadForCallback(callSid, 'keypress');
+  let pressError = null;
   try {
     await pressKeyOnLiveCall(callSid, keypress.digit, process.env.WEBHOOK_BASE_URL);
   } catch (err) {
+    pressError = err;
+  }
+  const thread = await threadPromise;
+  if (pressError) {
+    const err = pressError;
     console.error(`[voice] Failed to press key on live call  CallSid=${callSid}:`, err.message);
     if (thread) {
       await postToThread(
@@ -396,6 +415,43 @@ async function loadLiveTranscript(callSid) {
   }
 }
 
+/**
+ * The call's Slack thread, waiting for an in-flight post or rebuilding it when
+ * missing. Logs a persistent error instead of silently dropping the callback.
+ */
+async function threadForCallback(callSid, context) {
+  const { thread, recovered, error } = await resolveCallThread(callSid, {
+    getCallThread,
+    saveCallThread,
+    fetchCallParties: async (sid) => {
+      const call = await (await twilioClient()).calls(sid).fetch();
+      return resolveCallParties({ To: call.to, From: call.from }, {
+        zadarmaDomain: process.env.ZADARMA_TWILIO_SIP_DOMAIN || DEFAULT_ZADARMA_SIP_DOMAIN,
+      });
+    },
+    lookupLine: async (to) => {
+      const [friendlyName, channel, keypress] = await Promise.all([
+        getFriendlyName(to), getChannel(to), getKeypressConfig(to),
+      ]);
+      return { friendlyName, channel, keypressMode: keypress.mode };
+    },
+    createThread: (c) => sendCallStartToSlack({
+      channel: c.channel, friendlyName: c.friendlyName, toNumber: c.toNumber, fromNumber: c.fromNumber,
+    }),
+    sleep,
+  });
+
+  if (recovered) console.warn(`[voice] Rebuilt missing Slack thread  CallSid=${callSid}  (${context})`);
+  if (!thread) {
+    console.error(`[voice] No thread for CallSid=${callSid} (${context}): ${error}`);
+    await logTransaction({
+      type: 'voice-recording', callSid, otp: null, status: 'error',
+      error: `thread not found (${context}): ${error}`,
+    });
+  }
+  return thread;
+}
+
 // ─── POST /twilio-voice/recording ─────────────────────────────────────────────
 
 router.post('/recording', twilioValidate, async (req, res) => {
@@ -422,11 +478,8 @@ router.post('/recording', twilioValidate, async (req, res) => {
  * (e.g. the caller hung up before any audio was captured).
  */
 async function handleNoRecording(CallSid, status) {
-  const thread = await getCallThread(CallSid);
-  if (!thread) {
-    console.warn(`[voice] No thread found for CallSid=${CallSid} (status=${status})`);
-    return;
-  }
+  const thread = await threadForCallback(CallSid, `ended:${status}`);
+  if (!thread) return;
 
   // Pressing the IVR key redirects the call and cuts the first <Record> short;
   // the second <Record> is still running, so this is not a silent call.
@@ -456,27 +509,51 @@ async function handleNoRecording(CallSid, status) {
 }
 
 async function processRecording(CallSid, RecordingUrl, RecordingDuration) {
-  const thread = await getCallThread(CallSid);
-  if (!thread) {
-    console.warn(`[voice] No thread found for CallSid=${CallSid}`);
-    return;
-  }
+  const thread = await threadForCallback(CallSid, 'recording');
+  if (!thread) return;
 
   const duration = parseInt(RecordingDuration) || 0;
-  const language = await getLanguage(thread.toNumber);
-  const liveTranscript = await loadLiveTranscript(CallSid);
 
   try {
+    const [language, liveTranscript] = await Promise.all([
+      getLanguage(thread.toNumber).catch(() => null),
+      loadLiveTranscript(CallSid),
+    ]);
     const { buffer } = await downloadRecording(RecordingUrl);
     const filename = `call-${CallSid}-${Date.now()}.mp3`;
 
-    // Upload audio + transcribe in parallel
-    const [, transcript] = await Promise.all([
-      uploadAudioToSlack({ channel: thread.channel, threadTs: thread.threadTs, buffer, filename, duration }),
-      transcribeWithGroq(buffer, filename, language),
+    // Upload and transcription are independent: a failed upload (e.g. the bot
+    // is not in a #client-* channel) must never swallow the transcript + OTP.
+    const [upload, transcription] = await Promise.all([
+      uploadFileToThread(slack, {
+        channel: thread.channel,
+        threadTs: thread.threadTs,
+        buffer,
+        filename,
+        title: `📞 Recording — ${duration}s`,
+      }),
+      transcribeWithGroq(buffer, filename, language).then(
+        (text) => ({ text }),
+        (err) => ({ text: null, error: err.message })
+      ),
     ]);
+    const transcript = transcription.text;
 
-    console.log(`[voice] Audio uploaded to Slack  CallSid=${CallSid}`);
+    if (upload.ok) {
+      console.log(`[voice] Audio uploaded to Slack  CallSid=${CallSid}${upload.joined ? '  (joined channel first)' : ''}`);
+    } else {
+      console.error(`[voice] Audio upload failed  CallSid=${CallSid}  channel=${thread.channel}  error=${upload.error}${upload.joinError ? `  joinError=${upload.joinError}` : ''}`);
+      const notice = uploadFailureNotice(upload);
+      await postToThread(
+        thread.channel,
+        thread.threadTs,
+        [{ type: 'context', elements: [{ type: 'mrkdwn', text: `_${notice}_` }] }],
+        notice
+      );
+    }
+    if (transcription.error) {
+      console.error(`[voice] Transcription failed  CallSid=${CallSid}: ${transcription.error}`);
+    }
 
     // Auto mode but the IVR never asked for a key: say so, with what was heard,
     // so Ops can tell "no gate this time" from "detector missed the phrase".
@@ -490,18 +567,25 @@ async function processRecording(CallSid, RecordingUrl, RecordingDuration) {
       );
     }
 
-    // Post transcript if we got one
-    if (transcript) {
-      const otp = parseOtp(transcript);
+    // Whisper failed but the live transcript caught the call: use it so the
+    // code still reaches the thread.
+    const text = transcript || (transcription.error ? liveTranscript : null);
+    if (text) {
+      const otp = parseOtp(text);
       await postToThread(
         thread.channel,
         thread.threadTs,
-        buildCallTranscriptBlocks(transcript, otp),
-        `📝 "${transcript}"`,
+        buildCallTranscriptBlocks(text, otp),
+        `📝 "${text}"`,
         !!otp
       );
       console.log(`[voice] Transcript posted  otp=${otp || 'none'}`);
     }
+
+    const errors = [
+      !upload.ok && `upload: ${upload.error}${upload.joinError ? ` (join: ${upload.joinError})` : ''}`,
+      transcription.error && `transcription: ${transcription.error}`,
+    ].filter(Boolean);
 
     await logTransaction({
       type: 'voice-recording',
@@ -510,16 +594,17 @@ async function processRecording(CallSid, RecordingUrl, RecordingDuration) {
       callSid: CallSid,
       recordingUrl: `${RecordingUrl}.mp3`,
       duration,
-      transcript: transcript || null,
+      transcript: text || null,
       liveTranscript,
       keypress: thread.keypress || null,
-      otp: transcript ? parseOtp(transcript) : null,
+      otp: text ? parseOtp(text) : null,
       friendlyName: thread.friendlyName,
       channel: thread.channel,
-      status: 'success',
+      status: errors.length ? 'partial' : 'success',
+      ...(errors.length ? { error: errors.join('; ') } : {}),
     });
   } catch (err) {
-    console.error('[voice] Failed to upload recording to Slack:', err.message);
+    console.error('[voice] Failed to process recording:', err.message);
     await logTransaction({
       type: 'voice-recording',
       to: thread.toNumber,
