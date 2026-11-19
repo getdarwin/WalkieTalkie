@@ -42,6 +42,8 @@ src/
     capabilities.js             # Twilio capability sync, cron scheduler, cache
     settings.js                 # data/settings.json with env var fallbacks
     callThreads.js              # data/call-threads.json — maps CallSid → Slack thread (+ keypress state)
+    callThreadResolver.js       # resolveCallThread(): waits for / rebuilds a missing call thread (never drops a recording)
+    slackUpload.js              # uploadFileToThread(): not_in_channel → join + retry; never throws
     store.js                    # KV abstraction: Upstash Redis (prod) or data/store/*.json (dev)
     background.js               # backgroundTask(): waitUntil() so work survives the HTTP response on Vercel
     phone.js                    # normalizeE164 (accepts SIP URIs), parseE164 (strict), resolveCallParties
@@ -116,6 +118,11 @@ docs/
 - Incoming call → Slack thread notification + `<Start><Transcription>` + silent `<Record>` from second zero
 - The IVR is listened to live and the key it asks for is pressed automatically (see next section)
 - On recording callback: download MP3 from Twilio (30s timeout), upload to Slack, transcribe via Groq
+- Upload and transcription are independent: a failed upload posts a ⚠️ notice (e.g. bot not in the
+  channel → `/invite @Walkie Talkie`) and the transcript + OTP still go out; if Whisper fails the live
+  transcript is used. Either failure logs the entry as `partial`.
+- The call record is saved before the Slack post, and the answer webhook never waits more than 5s on Slack.
+  A callback with no thread waits up to 6s, then rebuilds the thread (from the record, or To/From via Twilio REST).
 - Transcription is multilingual (Spanish, Portuguese, English)
 - Call threads keyed by `channel:toNumber:YYYY-MM-DD` — one thread per line per day
 
